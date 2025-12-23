@@ -1716,6 +1716,7 @@ function getCommonCSS() {
         box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.4);
         gap: 0.5rem;
         white-space: nowrap;
+        font-size: 1rem;  /* 强制统一字号，解决 button 和 a 标签大小不一致问题 */
     }
     .btn:hover {
         transform: translateY(-2px);
