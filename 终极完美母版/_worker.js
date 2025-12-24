@@ -474,25 +474,26 @@ async function saveConfigToKV(env, cfipArr, fdipArr, u = null, protocolCfg = nul
 }
 
 async function connectWithTimeout(host, port, timeoutMs) {
-    let socket;
+    const socket = connect({
+        hostname: host,
+        port: port,
+        allowHalfOpen: true,
+        secureTransport: 'off'
+    });
+
     let timer = null;
+    const timeoutPromise = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            try { socket.close(); } catch(e) {}
+            reject(new Error(`Connect timeout (${timeoutMs}ms)`));
+        }, timeoutMs);
+    });
+
     try {
-        const socketPromise = connect({
-            hostname: host,
-            port: port,
-            allowHalfOpen: true,
-            secureTransport: 'off'
-        });
-
-        const timeoutPromise = new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`Connect timeout (${timeoutMs}ms)`)), timeoutMs);
-        });
-
-        socket = await Promise.race([socketPromise.then(s => s.opened.then(() => s)), timeoutPromise]);
-
+        await Promise.race([socket.opened, timeoutPromise]);
         return socket;
     } catch (error) {
-        if (socket) { try { socket.close(); } catch(e) {} }
+        try { socket.close(); } catch(e) {}
         throw error;
     } finally {
         if (timer) clearTimeout(timer);
@@ -2005,7 +2006,7 @@ function getLoginPage(url, baseUrl, showError = false, showPasswordChanged = fal
             <form method="post" action="/${cc?.klp || 'login'}">
                 <div class="form-group">
                     <label>访问密码</label>
-                    <input type="password" name="password" required autofocus placeholder="••••••••">
+                    <input type="password" name="password" required autofocus placeholder="请输入登录密码">
                 </div>
                 <button type="submit" class="btn">立即登录 ➜</button>
             </form>
@@ -2393,7 +2394,7 @@ function toggleCfMode() {
                     <div class="form-group">
                         <label>反代 IP/域名 (实际连接)</label>
                         <textarea name="fdip" placeholder="ip:port">${fdc.join('\n')}</textarea>
-                        <div class="help-text">用于中转流量的优选 IP</div>
+                        <div class="help-text">用于中转连接的优选 IP</div>
                     </div>
                 </div>
             </div>
@@ -3086,4 +3087,4 @@ async function startTest(){const testBtn=document.getElementById('test-btn');con
     });
 
     return response;
-}
+} 
