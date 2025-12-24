@@ -2382,12 +2382,12 @@ function toggleCfMode() {
                     <div class="form-group">
                         <label>优选 IP/域名 (Web伪装 & 订阅)</label>
                         <textarea name="cfip" placeholder="ip:port#CN">${yx.join('\n')}</textarea>
-                        <div class="help-text">格式: IP:Port#别名</div>
+                        <div class="help-text">支持格式: IP:Port#别名</div>
                     </div>
                     <div class="form-group">
                         <label>反代 IP/域名 (实际连接)</label>
                         <textarea name="fdip" placeholder="ip:port">${fdc.join('\n')}</textarea>
-                        <div class="help-text">用于中转流量的 Cloudflare 优选 IP</div>
+                        <div class="help-text">用于中转流量的优选 IP</div>
                     </div>
                 </div>
             </div>
@@ -2398,8 +2398,9 @@ function toggleCfMode() {
                     <div class="form-group">
                         <label>启用协议</label>
                         <div style="display:flex; gap:1.5rem; margin-top:0.5rem;">
-                            <label class="toggle-switch"><input type="checkbox" name="protocol_ev" ${ev ? 'checked' : ''}> VLESS</label>
-                            <label class="toggle-switch"><input type="checkbox" name="protocol_et" ${et ? 'checked' : ''}> Trojan</label>
+                            <label class="toggle-switch"><input type="checkbox" name="protocol_ev" ${ev ? 'checked' : ''}> Vless</label>
+                            <label class="toggle-switch"><input type="checkbox" name="protocol_et" ${et ? 
+'checked' : ''}> Trojan</label>
                         </div>
                     </div>
                     <div class="form-group">
@@ -2458,7 +2459,7 @@ function toggleCfMode() {
                 
                 <div class="form-group">
                     <label>订阅转换后端地址</label>
-                    <input type="text" name="dyhd" value="${cc?.dyhd || dyhd}" placeholder="例如 https://api.v1.mk/sub?">
+                    <input type="text" name="dyhd" value="${cc?.dyhd || dyhd}" placeholder="例如 https://xxx.xx.xx/sub?">
                     <div class="help-text">用于 Clash 和 SingBox 的在线转换后端。</div>
                 </div>
                 <div class="form-group">
@@ -2466,7 +2467,6 @@ function toggleCfMode() {
                     <input type="text" name="dypz" value="${cc?.dypz || dypz}" placeholder="远程规则配置文件的 URL">
                     <div class="help-text">用于 Clash 和 SingBox 的分流规则。</div>
                 </div>
-
                 <div class="form-group" style="border-top: 1px dashed var(--border); margin-top: 1rem; padding-top: 1rem;">
                     <label>Surge 专用远程模板</label>
                     <input type="text" name="surgeTemplate" value="${cc?.stp || ''}" placeholder="https://raw.githubusercontent.com/...">
@@ -2513,7 +2513,7 @@ function toggleCfMode() {
                         <div class="form-group">
                             <label>Global API Key</label>
                             <input type="password" name="cf_global_api_key" value="${cc?.cfConfig?.globalApiKey || ''}">
-                   <div class="help-text"> 推荐使用Account ID + API Token模式更安全 。</div>
+                   <div class="help-text"> 推荐使用 "Account ID + API Token" 模式更安全 。</div>
                         </div>
                     </div>
                 </div>
