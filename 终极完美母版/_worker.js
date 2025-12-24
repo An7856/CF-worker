@@ -1390,15 +1390,15 @@ ipv6 = false
 ${nodes.join('\n')}
 
 [Proxy Group]
-🚀 节点选择 = select, ${nodeNames.join(', ')}
+🌎 节点选择 = select, ${nodeNames.join(', ')}
 
 [Rule]
-RULE-SET,https://github.com/Blankwonder/surge-list/raw/master/blocked.list,🚀 节点选择
+RULE-SET,https://github.com/Blankwonder/surge-list/raw/master/blocked.list,🌎 节点选择
 RULE-SET,https://github.com/Blankwonder/surge-list/raw/master/cn.list,DIRECT
-RULE-SET,SYSTEM,🚀 节点选择
+RULE-SET,SYSTEM,🌎 节点选择
 RULE-SET,LAN,DIRECT
 GEOIP,CN,DIRECT
-FINAL, 🚀 节点选择,dns-failed`;
+FINAL, 🌎 节点选择,dns-failed`;
 }
 
 async function getCloudflareUsage(env) {
@@ -1716,7 +1716,7 @@ function getCommonCSS() {
         box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.4);
         gap: 0.5rem;
         white-space: nowrap;
-        font-size: 1rem;  /* 强制统一字号，解决 button 和 a 标签大小不一致问题 */
+        font-size: 1rem;
     }
     .btn:hover {
         transform: translateY(-2px);
@@ -1728,6 +1728,8 @@ function getCommonCSS() {
         border: 1px solid var(--border);
         color: var(--text);
         box-shadow: none;
+        font-size: 1rem;
+        padding: 0.875rem 1.5rem;
     }
     .btn-secondary:hover {
         background: rgba(255,255,255,0.05);
@@ -2163,7 +2165,11 @@ body { justify-content: flex-start; padding: 2rem 1rem; }
             </div>
             <div class="stat-item">
                 <span class="stat-label">协议</span>
-                <span class="stat-val">VLESS ${ev?'🟢':'🔴'} / Trojan ${et?'🟢':'🔴'}</span>
+                <span class="stat-val" style="display: flex; align-items: center; gap: 8px; justify-content: flex-end;">
+                 <span style="color:${ev?'#22c55e':'#94a3b8'}">Vless ${ev?'●':'●'}</span>
+                  <span style="opacity: 0.2;">|</span>
+                  <span style="color:${et?'#22c55e':'#94a3b8'}">Trojan ${et?'●':'●'}</span>
+                </span>
             </div>
             <div class="stat-item">
                 <span class="stat-label">代理转发</span>
@@ -2192,8 +2198,8 @@ body { justify-content: flex-start; padding: 2rem 1rem; }
         <div class="card" style="grid-column: 1 / -1;">
              <h3 style="margin-top:0"><i class="fas fa-tools" style="color:#f59e0b"></i> 快捷工具</h3>
              <div class="action-grid">
-                <a href="/zxyx" class="btn"><i class="fas fa-tachometer-alt"></i> 在线优选 IP</a>
                 <a href="/admin#ip" class="btn btn-secondary"><i class="fas fa-list"></i> IP 库管理</a>
+                <a href="/zxyx" class="btn"><i class="fas fa-tachometer-alt"></i> 在线优选 IP</a>
              </div>
         </div>
     </div>
@@ -2367,7 +2373,7 @@ function toggleCfMode() {
             <a href="/" class="btn-secondary btn" style="width:auto">返回主页</a>
         </div>
         
-        ${msg === 'saved' ? '<div class="success-msg" id="success-msg">✅ 配置已保存并立即生效</div><script>setTimeout(()=>{const m=document.getElementById("success-msg");if(m){m.style.opacity="0";m.style.transform="translateY(-10px)";setTimeout(()=>m.remove(),500)}},3000);</script>' : ''}
+        ${msg === 'saved' ? '<div class="success-msg" id="success-msg">配置已保存并立即生效</div><script>setTimeout(()=>{const m=document.getElementById("success-msg");if(m){m.style.opacity="0";m.style.transform="translateY(-10px)";setTimeout(()=>m.remove(),500)}},3000);</script>' : ''}
 
         <form action="/admin/save" method="post">
             <div class="card section-card" id="ip">
@@ -2507,6 +2513,7 @@ function toggleCfMode() {
                         <div class="form-group">
                             <label>Global API Key</label>
                             <input type="password" name="cf_global_api_key" value="${cc?.cfConfig?.globalApiKey || ''}">
+                   <div class="help-text"> 推荐使用Account ID + API Token模式更安全 。</div>
                         </div>
                     </div>
                 </div>
