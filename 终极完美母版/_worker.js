@@ -475,21 +475,27 @@ async function saveConfigToKV(env, cfipArr, fdipArr, u = null, protocolCfg = nul
 
 async function connectWithTimeout(host, port, timeoutMs) {
     let socket;
+    let timer = null;
     try {
-        const connectPromise = connect({
+        const socketPromise = connect({
             hostname: host,
             port: port,
-            allowHalfOpen: true
+            allowHalfOpen: true,
+            secureTransport: 'off'
         });
+
         const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`Connect timeout (${timeoutMs}ms)`)), timeoutMs);
+            timer = setTimeout(() => reject(new Error(`Connect timeout (${timeoutMs}ms)`)), timeoutMs);
         });
-        socket = await Promise.race([connectPromise, timeoutPromise]);
-        await socket.opened;
+
+        socket = await Promise.race([socketPromise.then(s => s.opened.then(() => s)), timeoutPromise]);
+
         return socket;
     } catch (error) {
         if (socket) { try { socket.close(); } catch(e) {} }
         throw error;
+    } finally {
+        if (timer) clearTimeout(timer);
     }
 }
 
@@ -1051,7 +1057,7 @@ async function httpConnect(addressRemote, portRemote, proxyAddress) {
             `CONNECT ${addressRemote}:${portRemote} HTTP/1.1\r\n` +
             `Host: ${addressRemote}:${portRemote}\r\n` +
             authHeader +
-            `User-Agent: Mozilla/5.0 (compatible; Cloudflare-Workers)\r\n` +
+            `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36\r\n` +
             `Connection: Keep-Alive\r\n\r\n`;
         await writer.write(encoder.encode(connectRequest));
         let responseBuffer = new Uint8Array(0);
