@@ -1370,7 +1370,7 @@ async function genSurgeConfig(u, url) {
         });
     }
 
-    if (nodes.length === 0) return '';
+    if (nodes.length === 0) return '骚年，不用怀疑，你未启用Trojan协议，请到设置里启用Trojan再使用喔！！！';
 
     if (stp) {
         try {
@@ -1416,48 +1416,62 @@ async function getCloudflareUsage(env) {
     
     if (!cc?.cfConfig) return { success: false, pages: 0, workers: 0, total: 0 };
     const { apiMode, accountId, apiToken, email, globalApiKey } = cc.cfConfig;
-    if (!accountId || (!apiToken && (!email || !globalApiKey))) {
+    if (!apiToken && (!email || !globalApiKey)) {
         return { success: false, pages: 0, workers: 0, total: 0 };
     }
 
     const API = "https://api.cloudflare.com/client/v4";
     const sum = (a) => a?.reduce((t, i) => t + (i?.sum?.requests || 0), 0) || 0;
-    const cfg = { "Content-Type": "application/json" };
+    
+    const headers = apiMode === 'token' ?
+        { "Authorization": `Bearer ${apiToken}`, "Content-Type": "application/json" } :
+        { "X-AUTH-EMAIL": email, "X-AUTH-KEY": globalApiKey, "Content-Type": "application/json" };
 
     try {
         let AccountID = accountId;
-        if (!AccountID && apiMode === 'email') {
-            const r = await fetch(`${API}/accounts`, {
-                method: "GET",
-                headers: { ...cfg, "X-AUTH-EMAIL": email, "X-AUTH-KEY": globalApiKey }
-            });
-            if (!r.ok) return { success: false, pages: 0, workers: 0, total: 0 };
-            const d = await r.json();
-            if (!d?.result?.length) return { success: false, pages: 0, workers: 0, total: 0 };
-            const idx = d.result.findIndex(a => a.name?.toLowerCase().startsWith(email.toLowerCase()));
-            AccountID = d.result[idx >= 0 ? idx : 0]?.id;
+        if (!AccountID) {
+            try {
+                const r = await fetch(`${API}/accounts`, {
+                    method: "GET",
+                    headers: headers
+                });
+                if (r.ok) {
+                    const d = await r.json();
+                    if (d?.result?.length > 0) {
+                        AccountID = d.result[0].id;
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to fetch account ID:", e);
+            }
         }
+
+        if (!AccountID) return { success: false, pages: 0, workers: 0, total: 0 };
 
         const dateNow = new Date();
         dateNow.setUTCHours(0, 0, 0, 0);
-        const hdr = apiMode === 'token' ?
-            { ...cfg, "Authorization": `Bearer ${apiToken}` } : { ...cfg, "X-AUTH-EMAIL": email, "X-AUTH-KEY": globalApiKey };
+        
         const res = await fetch(`${API}/graphql`, {
             method: "POST",
-            headers: hdr,
+            headers: headers,
             body: JSON.stringify({
                 query: `query getBillingMetrics($AccountID: String!, $filter: AccountWorkersInvocationsAdaptiveFilter_InputObject) {
                     viewer { accounts(filter: {accountTag: $AccountID}) {
-         
-                pagesFunctionsInvocationsAdaptiveGroups(limit: 1000, filter: $filter) { sum { requests } }
+                        pagesFunctionsInvocationsAdaptiveGroups(limit: 1000, filter: $filter) { sum { requests } }
                         workersInvocationsAdaptive(limit: 10000, filter: $filter) { sum { requests } }
                     } }
                 }`,
-
-                variables: { AccountID, filter: { datetime_geq: dateNow.toISOString(), datetime_leq: new Date().toISOString() } }
+                variables: { 
+                    AccountID, 
+                    filter: { 
+                        datetime_geq: dateNow.toISOString(), 
+                        datetime_leq: new Date().toISOString() 
+                    } 
+                }
             })
         });
-    if (!res.ok) return { success: false, pages: 0, workers: 0, total: 0 };
+
+        if (!res.ok) return { success: false, pages: 0, workers: 0, total: 0 };
         const result = await res.json();
         if (result.errors?.length) return { success: false, pages: 0, workers: 0, total: 0 };
 
@@ -1473,6 +1487,7 @@ async function getCloudflareUsage(env) {
         lastUsageTime = now;
         return usageResult;
     } catch (error) {
+        console.error("Usage API Error:", error);
         return { success: false, pages: 0, workers: 0, total: 0 };
     }
 }
@@ -1767,6 +1782,13 @@ function getCommonCSS() {
         color: var(--text-light);
         opacity: 0.8;
     }
+    .toggle-switch {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        cursor: pointer;
+        user-select: none;
+    }
     .toggle-switch input {
         appearance: none;
         -webkit-appearance: none;
@@ -1873,7 +1895,6 @@ async function handleUsageAPI(req, env, ctx) {
     
     const config = await optimizeConfigLoading(env, ctx);
     const hasCloudflareConfig = config?.cfConfig && 
-        config.cfConfig.accountId && 
         (config.cfConfig.apiToken || (config.cfConfig.email && config.cfConfig.globalApiKey));
     if (!hasCloudflareConfig) {
         return ResponseBuilder.json({ 
@@ -2190,10 +2211,6 @@ body { justify-content: flex-start; padding: 2rem 1rem; }
 
         <div class="card">
             <h3 style="margin-top:0"><i class="fas fa-link" style="color:#ec4899"></i> 订阅管理</h3>
-            <div class="stat-item">
-                <span class="stat-label">UUID</span>
-                <span class="stat-val">${uuid.substring(0,8)}... <i class="fas fa-copy copy-btn" onclick="copy('${uuid}')"></i></span>
-            </div>
             <div class="action-grid">
                 <button class="btn btn-secondary" onclick="copy('${base}/${uuid}')"><i class="fas fa-bolt"></i> Base64</button>
                 <button class="btn btn-secondary" onclick="copySub('clash')"><i class="fas fa-cat"></i> Clash</button>
@@ -2293,7 +2310,7 @@ async function handleAdminSave(req, env) {
         const protocolTp = form.get('protocol_tp');
         
         const cfApiMode = form.get('cf_api_mode');
-        const cfAccountId = form.get('cf_account_id');
+        let cfAccountId = form.get('cf_account_id');
         const cfApiToken = form.get('cf_api_token');
         const cfEmail = form.get('cf_email');
         const cfGlobalApiKey = form.get('cf_global_api_key');
@@ -2311,6 +2328,24 @@ async function handleAdminSave(req, env) {
         
         if (newPassword) await sP(env, newPassword);
 
+        if (cfApiMode === 'token' && !cfAccountId && cfApiToken) {
+            try {
+                const resp = await fetch("https://api.cloudflare.com/client/v4/accounts", {
+                    headers: {
+                        "Authorization": `Bearer ${cfApiToken}`,
+                        "Content-Type": "application/json"
+                    }
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.result && data.result.length > 0) {
+                        cfAccountId = data.result[0].id;
+                    }
+                }
+            } catch (e) {
+            }
+        }
+        
         const protocolCfg = { ev: protocolEv, et: protocolEt, tp: protocolTp };
         const cfCfg = { apiMode: cfApiMode, accountId: cfAccountId, apiToken: cfApiToken, email: cfEmail, globalApiKey: cfGlobalApiKey };
         const proxyCfg = { enabled: proxyEnabled, type: proxyType, account: proxyAccount, global: proxyMode === 'global', whitelist: [] };
@@ -2347,23 +2382,49 @@ async function getAdminPage(req, env) {
 <style>
 ${getCommonCSS()}
 body { justify-content: flex-start; padding: 2rem 1rem; }
-.admin-container { max-width: 900px; width: 100%; margin: 0 auto; }
-.section-card { margin-bottom: 1.5rem; }
-textarea { font-family: monospace; height: 150px; font-size: 0.85rem; }
-.toggle-switch { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; user-select: none; }
-.help-text { font-size: 0.8rem; color: var(--text-light); margin-top: 0.25rem; }
-h2 { font-size: 1.1rem; margin-bottom: 1rem; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-@media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+.admin-container { max-width: 1000px; width: 100%; margin: 0 auto; }
+.card { padding: 1.5rem; margin-bottom: 1.5rem; }
+h3 {
+    margin-top: 0;
+    margin-bottom: 1.25rem;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+@media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+label { font-size: 0.9rem; font-weight: 600; color: var(--text); margin-bottom: 0.5rem; display: block; }
+.form-group { margin-bottom: 1.25rem; position: relative; }
+textarea { 
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace; 
+    font-size: 0.85rem; 
+    line-height: 1.4;
+    height: 140px; 
+    background: rgba(255,255,255,0.03); 
+    border-color: var(--border);
+}
+textarea:focus { background: rgba(255,255,255,0.08); }
+.help-text { 
+    font-size: 0.8rem; 
+    color: var(--text-light); 
+    margin-top: 0.5rem; 
+    line-height: 1.4;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    background: rgba(255,255,255,0.03);
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+}
+.help-text i { margin-top: 0.15rem; color: var(--primary); opacity: 0.8; }
+.toggle-switch { margin-bottom: 0; }
 </style>
 <script>
 function genUUID() {
-    const p1 = 'xxxxxxxx-xxxx-4xxx';
-    const p2 = '-yxxx-xxxxxxxxxxxx';
-    const u = (p1 + p2).replace(/[xy]/g, function(c) {
-        const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
+    const u = crypto.randomUUID();
     document.getElementById('uuid').value = u;
 }
 function toggleCfMode() {
@@ -2377,37 +2438,36 @@ function toggleCfMode() {
     <div class="admin-container">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1.5rem;">
             <h1 style="margin:0"><i class="fas fa-cogs"></i> 系统配置</h1>
-            <a href="/" class="btn-secondary btn" style="width:auto">返回主页</a>
+            <a href="/" class="btn-secondary btn" style="width:auto; padding: 0.6rem 1.2rem; gap: 0.5rem;"><i class="fas fa-arrow-left"></i> 返回主页</a>
         </div>
         
-        ${msg === 'saved' ? '<div class="success-msg" id="success-msg">配置已保存并立即生效</div><script>setTimeout(()=>{const m=document.getElementById("success-msg");if(m){m.style.opacity="0";m.style.transform="translateY(-10px)";setTimeout(()=>m.remove(),500)}},3000);</script>' : ''}
+        ${msg === 'saved' ? '<div class="success-msg" id="success-msg"><i class="fas fa-check-circle"></i> 配置已保存并立即生效</div><script>setTimeout(()=>{const m=document.getElementById("success-msg");if(m){m.style.opacity="0";m.style.transform="translateY(-10px)";setTimeout(()=>m.remove(),500)}},3000);</script>' : ''}
 
         <form action="/admin/save" method="post">
-            <div class="card section-card" id="ip">
-                <h2><i class="fas fa-globe" style="color:var(--primary)"></i> IP 资源管理</h2>
+            <div class="card" id="ip">
+                <h3><i class="fas fa-globe" style="color:var(--primary)"></i> IP 资源管理</h3>
                 <div class="grid-2">
                     <div class="form-group">
-                        <label>优选 IP/域名 (Web伪装 & 订阅)</label>
-                        <textarea name="cfip" placeholder="ip:port#CN">${yx.join('\n')}</textarea>
-                        <div class="help-text">支持格式: IP:Port#别名</div>
+                        <label>优选 IP / 域名 (Web伪装 & 订阅)</label>
+                        <textarea name="cfip" placeholder="例如: 1.1.1.1:443#美国">${yx.join('\n')}</textarea>
+                        <div class="help-text"><i class="fas fa-info-circle"></i><span>格式: <code>IP:端口#备注</code><br>用于 Web 伪装和生成订阅链接。</span></div>
                     </div>
                     <div class="form-group">
-                        <label>反代 IP/域名 (实际连接)</label>
-                        <textarea name="fdip" placeholder="ip:port">${fdc.join('\n')}</textarea>
-                        <div class="help-text">用于中转连接的优选 IP</div>
+                        <label>反代 IP / 域名 (中转连接)</label>
+                        <textarea name="fdip" placeholder="例如: ip.sb">${fdc.join('\n')}</textarea>
+                        <div class="help-text"><i class="fas fa-info-circle"></i><span>格式: <code>IP</code> 或 <code>域名</code><br>用于 Worker 实际回源连接。</span></div>
                     </div>
                 </div>
             </div>
 
-            <div class="card section-card">
-                <h2><i class="fas fa-shield-alt" style="color:#ec4899"></i> 协议与安全</h2>
+            <div class="card">
+                <h3><i class="fas fa-shield-alt" style="color:#ec4899"></i> 协议与安全</h3>
                 <div class="grid-2">
                     <div class="form-group">
                         <label>启用协议</label>
-                        <div style="display:flex; gap:1.5rem; margin-top:0.5rem;">
-                            <label class="toggle-switch"><input type="checkbox" name="protocol_ev" ${ev ? 'checked' : ''}> Vless</label>
-                            <label class="toggle-switch"><input type="checkbox" name="protocol_et" ${et ? 
-'checked' : ''}> Trojan</label>
+                        <div style="display:flex; gap:2rem; margin-top:0.5rem; background:rgba(255,255,255,0.03); padding:1rem; border-radius:0.5rem; align-items:center;">
+                            <label class="toggle-switch" style="margin:0"><input type="checkbox" name="protocol_ev" ${ev ? 'checked' : ''}> Vless</label>
+                            <label class="toggle-switch" style="margin:0"><input type="checkbox" name="protocol_et" ${et ? 'checked' : ''}> Trojan</label>
                         </div>
                     </div>
                     <div class="form-group">
@@ -2417,22 +2477,23 @@ function toggleCfMode() {
                 </div>
                 <div class="form-group">
                     <label>UUID (用户ID)</label>
-                    <div style="display: flex; gap: 0.5rem;">
-                        <input type="text" id="uuid" name="uuid" value="${uid}" required>
-                        <button type="button" class="btn-secondary" onclick="genUUID()" style="width: auto;">生成</button>
+                    <div style="display: flex; gap: 0.75rem;">
+                        <input type="text" id="uuid" name="uuid" value="${uid}" required style="font-family:monospace;">
+                        <button type="button" class="btn btn-secondary" onclick="genUUID()" style="width: auto; padding: 0 1.5rem;">生成</button>
                     </div>
                 </div>
                  <div class="form-group">
                     <label>修改后台密码</label>
                     <input type="password" name="new_password" placeholder="留空保持不变">
-                    <div class="help-text">修改密码成功后，务必使用新密码重新登录。</div>
                 </div>
             </div>
 
-            <div class="card section-card">
-                <h2><i class="fas fa-network-wired" style="color:#f59e0b"></i> 代理转发 (SOCKS5/HTTP)</h2>
+            <div class="card">
+                <h3><i class="fas fa-network-wired" style="color:#f59e0b"></i> 代理转发 (SOCKS5/HTTP)</h3>
                 <div class="form-group">
-                    <label class="toggle-switch"><input type="checkbox" name="proxy_enabled" ${cc?.proxyConfig?.enabled ? 'checked' : ''}> 启用代理转发</label>
+                    <label class="toggle-switch" style="display:flex; align-items:center; margin-bottom: 1rem;">
+                        <input type="checkbox" name="proxy_enabled" ${cc?.proxyConfig?.enabled ? 'checked' : ''}> 启用代理转发功能
+                    </label>
                 </div>
                 <div class="grid-2">
                     <div class="form-group">
@@ -2448,8 +2509,8 @@ function toggleCfMode() {
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>代理模式</label>
-                    <div style="display:flex; gap:1.5rem; margin-top:0.5rem;">
+                    <label>转发模式</label>
+                    <div style="display:flex; gap:2rem; margin-top:0.5rem; background:rgba(255,255,255,0.03); padding:1rem; border-radius:0.5rem;">
                         <label class="toggle-switch">
                             <input type="radio" name="proxy_mode" value="global" ${cc?.proxyConfig?.global ? 'checked' : ''}> 全局代理 (Global)
                         </label>
@@ -2457,60 +2518,85 @@ function toggleCfMode() {
                             <input type="radio" name="proxy_mode" value="failover" ${!cc?.proxyConfig?.global ? 'checked' : ''}> 故障分流 (Failover)
                         </label>
                     </div>
-                    <div class="help-text">全局：所有流量优先走代理；分流：直连失败后尝试代理。</div>
+                    <div class="help-text" style="margin-top:0.5rem;"><i class="fas fa-lightbulb"></i><span>全局：所有流量优先走代理；分流：直连失败后尝试代理。</span></div>
+                    <div style="margin-top: 0.75rem;">
+                        <details style="background: transparent; border: none;">
+                            <summary style="cursor: pointer; color: var(--primary); font-size: 0.85rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <i class="fas fa-question-circle" style="font-size: 0.8rem;"></i>
+                                支持格式说明
+                            </summary>
+                            <div style="margin-top: 0.5rem; padding: 0.5rem; background: rgba(255,255,255,0.03); border-radius: 0.25rem; font-size: 0.75rem; line-height: 1.4;">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                                    <div>
+                                        <div style="color: var(--text); font-weight: 500;">基本格式</div>
+                                        <code style="font-size: 0.7rem;">user:pass@host:port</code>
+                                        <br><code style="font-size: 0.7rem;">host:port</code>
+                                    </div>
+                                    <div>
+                                        <div style="color: var(--text); font-weight: 500;">高级格式</div>
+                                        <code style="font-size: 0.7rem;">base64@host:port</code>
+                                        <br><code style="font-size: 0.7rem;">[IPv6]:port</code>
+                                    </div>
+                                </div>
+                                <div style="margin-top: 0.5rem; color: var(--text-light); font-size: 0.7rem;">
+                                    <i class="fas fa-bolt" style="color: var(--primary);"></i>
+                                    路径用法: <code>socks5://...#备注</code> 或 <code>http://...#备注</code>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
                 </div>
             </div>
             
-            <div class="card section-card">
-                <h2><i class="fas fa-bolt" style="color:#8b5cf6"></i> 订阅配置</h2>
-                
-                <div class="form-group">
-                    <label>订阅转换后端地址</label>
-                    <input type="text" name="dyhd" value="${cc?.dyhd || dyhd}" placeholder="例如 https://xxx.xx.xx/sub?">
-                    <div class="help-text">用于 Clash 和 SingBox 的在线转换后端。</div>
+            <div class="card">
+                <h3><i class="fas fa-bolt" style="color:#8b5cf6"></i> 订阅配置</h3>
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>订阅转换后端地址</label>
+                        <input type="text" name="dyhd" value="${cc?.dyhd || dyhd}" placeholder="https://xxx.xx.xx/sub?">
+                    </div>
+                    <div class="form-group">
+                        <label>远程配置规则地址</label>
+                        <input type="text" name="dypz" value="${cc?.dypz || dypz}" placeholder="https://...">
+                    </div>
                 </div>
                 <div class="form-group">
-                    <label>订阅转换配置文件</label>
-                    <input type="text" name="dypz" value="${cc?.dypz || dypz}" placeholder="远程规则配置文件的 URL">
-                    <div class="help-text">用于 Clash 和 SingBox 的分流规则。</div>
-                </div>
-                <div class="form-group" style="border-top: 1px dashed var(--border); margin-top: 1rem; padding-top: 1rem;">
-                    <label>Surge 专用远程模板</label>
+                    <label>Surge 专用模版</label>
                     <input type="text" name="surgeTemplate" value="${cc?.stp || ''}" placeholder="https://raw.githubusercontent.com/...">
-                    <div class="help-text">仅影响 Surge 订阅。留空则使用内置默认配置。</div>
+                    <div class="help-text"><i class="fas fa-exclamation-circle"></i><span>仅影响 Surge 订阅格式。留空则使用系统内置模版。</span></div>
                 </div>
-
                  <div class="form-group">
-                    <label>自定义后台入口</label>
-                    <input type="text" name="login_path" value="${cc?.klp || 'login'}">
-                    <div class="help-text"> 设置后只能通过 域名/自定义路径 访问登录页面。</div>
+                    <label>自定义后台入口路径</label>
+                    <div style="position:relative;">
+                        <span style="position:absolute; left:1rem; top:0.75rem; color:var(--text-light); opacity:0.5;">/</span>
+                        <input type="text" name="login_path" value="${cc?.klp || 'login'}" style="padding-left: 2rem;">
+                    </div>
+                    <div class="help-text"><i class="fas fa-lock"></i> <span>设置后只能通过 <code>域名/路径</code> 访问。</span></div>
                 </div>
             </div>
 
-            <div class="card section-card">
-                <h2><i class="fas fa-chart-line" style="color:#10b981"></i> Cloudflare API (用量统计)</h2>
+            <div class="card" style="margin-bottom: 5rem;">
+                <h3><i class="fas fa-chart-line" style="color:#10b981"></i> Cloudflare API (用量统计)</h3>
                 <div class="form-group">
                     <label>认证模式</label>
                     <select id="cf_api_mode" name="cf_api_mode" onchange="toggleCfMode()">
-                        <option value="token" ${cc?.cfConfig?.apiMode !== 'email' ? 'selected' : ''}>Account ID + API Token</option>
+                        <option value="token" ${cc?.cfConfig?.apiMode !== 'email' ? 'selected' : ''}>Account ID + API Token (推荐)</option>
                         <option value="email" ${cc?.cfConfig?.apiMode === 'email' ? 'selected' : ''}>Email + Global Key</option>
                     </select>
                 </div>
-                
                 <div id="cf_token_fields">
                     <div class="grid-2">
                         <div class="form-group">
                             <label>Account ID</label>
-                            <input type="text" name="cf_account_id" value="${cc?.cfConfig?.accountId || ''}">
+                            <input type="text" name="cf_account_id" value="${cc?.cfConfig?.accountId || ''}"placeholder="支持手动输入 & 支持通过Token自动获取">
                         </div>
                         <div class="form-group">
                             <label>API Token</label>
-                            <input type="password" name="cf_api_token" value="${cc?.cfConfig?.apiToken || ''}">
-                   <div class="help-text"> API 令牌权限使用"阅读分析数据和日志"模板即可。</div>
+                            <input type="password" name="cf_api_token" value="${cc?.cfConfig?.apiToken || ''}"placeholder="填入Token并保存后，系统将尝试自动获取ID">
                         </div>
                     </div>
+                    <div class="help-text"><i class="fas fa-shield-alt"></i><span>请在 Cloudflare 用户资料页创建 Token，权限选择 "Analytics: Read" (分析:读取)。</span></div>
                 </div>
-
                 <div id="cf_email_fields" style="display:none;">
                     <div class="grid-2">
                         <div class="form-group">
@@ -2520,13 +2606,16 @@ function toggleCfMode() {
                         <div class="form-group">
                             <label>Global API Key</label>
                             <input type="password" name="cf_global_api_key" value="${cc?.cfConfig?.globalApiKey || ''}">
-                   <div class="help-text"> 推荐使用 "Account ID + API Token" 模式更安全 。</div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <button type="submit" class="btn" style="position: sticky; bottom: 1rem; box-shadow: 0 10px 30px rgba(0,0,0,0.5); z-index: 100;">保存所有配置</button>
+            <div style="position: fixed; bottom: 2rem; left: 0; right: 0; display: flex; justify-content: center; pointer-events: none; z-index: 100;">
+                <button type="submit" class="btn" style="pointer-events: auto; box-shadow: 0 10px 30px rgba(79, 70, 229, 0.4); width: auto; padding: 1rem 3rem; border-radius: 2rem;">
+                    <i class="fas fa-save"></i> 保存所有配置
+                </button>
+            </div>
         </form>
         <script>toggleCfMode();</script>
     </div>
@@ -2962,65 +3051,191 @@ async function zxyx(request, env, txt = 'ADD.txt') {
     const cfIPs = [];
     const isChina = country === 'CN';
     const countryDisplayClass = isChina ? '' : 'proxy-warning';
-    const countryDisplayText = isChina ? `${country}` : `${country} ⚠️`;
+    const countryDisplayText = isChina ? `${country}` : `${country} (可能需关闭代理)`;
 
-    const html = `<!DOCTYPE html><html><head><title>Cloudflare IP优选 (仅延迟)</title><style>
-    body{width:80%;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;padding:20px}
-    .header-container{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;position:relative}
-    .page-title{text-align:center;flex:1;margin:0}
-    .ip-list{background-color:#f5f5f5;padding:10px;border-radius:5px;max-height:400px;overflow-y:auto}
-    .ip-item{margin:2px 0;font-family:monospace}
-    .stats{background-color:#e3f2fd;padding:15px;border-radius:5px;margin:20px 0}
-    .proxy-warning{color:#d32f2f!important;font-weight:bold!important;font-size:1.1em}
-    .test-controls{margin:20px 0;padding:15px;background-color:#f9f9f9;border-radius:5px}
-    .port-selector,.count-selector,.concurrency-selector{margin:10px 0}
-    label{font-weight:bold;margin-right:10px}
-    select,input{padding:5px 10px;font-size:14px;border:1px solid #ccc;border-radius:3px}
-    .count-selector input{width:80px}.concurrency-selector input{width:60px}
-    .button-group{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px;justify-content:center}
-    .button-row{display:flex;gap:10px;justify-content:center;width:100%;margin:5px 0}
-    button{color:white;padding:15px 32px;text-align:center;text-decoration:none;display:inline-block;font-size:16px;cursor:pointer;border:none;border-radius:4px;transition:background-color 0.3s}
-    .test-button{background-color:#4CAF50}
-    .replace-cf-button{background-color:#2196F3}.replace-cf-button:hover{background-color:#1976D2}
-    .append-cf-button{background-color:#FF9800}.append-cf-button:hover{background-color:#F57C00}
-    .replace-fd-button{background-color:#9C27B0}.replace-fd-button:hover{background-color:#7B1FA2}
-    .append-fd-button{background-color:#E91E63}.append-fd-button:hover{background-color:#C2185B}
-    button:disabled{background-color:#cccccc!important;cursor:not-allowed}
-    .config-button,.home-button{background-color:#607D8B;padding:10px 20px;font-size:14px}.home-button{background-color:#795548}
-    .message{padding:10px;margin:10px 0;border-radius:4px;display:none}
-    .message.success{background-color:#d4edda;color:#155724;border:1px solid #c3e6cb}
-    .message.error{background-color:#f8d7da;color:#721c24;border:1px solid #f5c6cb}
-    .progress{width:100%;background-color:#f0f0f0;border-radius:5px;margin:10px 0}
-    .progress-bar{width:0%;height:20px;background-color:#4CAF50;border-radius:5px;transition:width 0.3s}
-    .good-latency{color:#4CAF50;font-weight:bold}.medium-latency{color:#FF9800;font-weight:bold}.bad-latency{color:#f44336;font-weight:bold}
-    .show-more-section{text-align:center;margin:10px 0;padding:10px;background-color:#f0f0f0;border-radius:5px}
-    .show-more-btn{background-color:#607D8B;color:white;padding:8px 20px;border:none;border-radius:4px;cursor:pointer;font-size:14px;transition:background-color 0.3s}
-    .ip-display-info{font-size:12px;color:#666;margin-bottom:5px}
-    .auto-save-notice{background-color:#e8f5e8;border:1px solid #4CAF50;border-radius:5px;padding:10px;margin:10px 0;font-size:14px;color:#2e7d32}
-    .local-file-info{background-color:#e8f4fd;border:1px solid #b8daff;border-radius:5px;padding:10px;margin:10px 0;font-size:14px}
-    .local-file-stats{display:flex;gap:15px;flex-wrap:wrap}.local-file-stat{display:flex;flex-direction:column}
-    .local-file-stat label{font-weight:bold;color:#0056b3;font-size:12px}
-    #saved-files-select{max-width:250px;min-width:150px}
-    .file-management-buttons{display:flex;gap:5px;margin-left:10px}
-    .file-management-btn{padding:6px 12px;font-size:12px;border:none;border-radius:4px;cursor:pointer}
-    .rename-btn{background-color:#ffc107;color:#212529}.delete-btn{background-color:#dc3545;color:white}
-    </style></head><body>
-<div class="header-container">
-    <button class="home-button" id="home-btn" onclick="goHome()">返回主页</button>
-    <h1 class="page-title">在线优选工具 (仅延迟)</h1>
-    <button class="config-button" id="config-btn" onclick="goConfig()">返回配置</button>
-</div>
-${!isChina ? `<div style="background-color:#ffebee;border:2px solid #f44336;border-radius:8px;padding:15px;margin:15px 0;color:#c62828;"><h3>🚨 代理检测警告</h3><p>检测到您当前很可能处于代理/VPN环境中！测试结果将不准确。</p></div>` : ''}
-<div class="auto-save-notice"><strong>自动保存说明：</strong> 使用下方的"替换"或"追加"按钮后，IP列表将自动保存到配置中并立即生效。</div>
-<div class="stats"><h2>统计信息</h2><p><strong>您的国家：</strong><span class="${countryDisplayClass}">${countryDisplayText}</span></p><p><strong>获取到的IP总数：</strong><span id="ip-count">点击开始测试后加载</span></p><p><strong>测试进度：</strong><span id="progress-text">未开始</span></p><div class="progress"><div class="progress-bar" id="progress-bar"></div></div></div>
-<div class="test-controls">
-    <div class="port-selector"><label for="ip-source-select">IP库：</label><select id="ip-source-select"><option value="official">CF官方列表</option><option value="as13335">AS13335列表</option><option value="as209242">AS209242列表</option><option value="as24429">AS24429列表(Alibaba)</option><option value="as199524">AS199524列表(G-Core)</option><option value="local">本地上传</option></select><label for="port-select" style="margin-left:20px;">端口：</label><select id="port-select"><option value="443">443</option><option value="2053">2053</option><option value="2083">2083</option><option value="2087">2087</option><option value="2096">2096</option><option value="8443">8443</option></select><label for="local-file-input" style="margin-left:20px;">本地上传：</label><input type="file" id="local-file-input" accept=".txt,.json,.csv,.conf,.list,.yml,.yaml" style="display:none;" onchange="handleFileUpload(this.files)"><button class="test-button" id="upload-btn" onclick="document.getElementById('local-file-input').click()" style="padding:8px 16px;font-size:14px;">选择文件</button></div>
-    <div class="port-selector"><label for="saved-files-select">已保存文件：</label><select id="saved-files-select" onchange="handleSavedFileSelect(this)" style="padding:5px 10px;font-size:14px;min-width:250px;"><option value="">--选择已保存文件--</option></select><div class="file-management-buttons"><button class="file-management-btn rename-btn" id="rename-btn" onclick="renameSavedFile()" disabled>重命名</button><button class="file-management-btn delete-btn" id="delete-btn" onclick="deleteSavedFile()" disabled>删除</button></div></div>
-    <div class="count-selector"><label for="count-input">测试数量：</label><input type="number" id="count-input" value="50" min="1" max="1000"></div>
-    <div class="concurrency-selector"><label for="concurrency-input">并发数量：</label><input type="number" id="concurrency-input" value="6" min="1" max="20"></div>
-    <div class="button-group"><div class="button-row"><button class="test-button" id="test-btn" onclick="startTest()">开始测试延迟</button></div><div class="button-row"><button class="replace-cf-button" id="replace-cf-btn" onclick="replaceCFIPs()" disabled>替换优选IP</button><button class="append-cf-button" id="append-cf-btn" onclick="appendCFIPs()" disabled>追加优选IP</button></div><div class="button-row"><button class="replace-fd-button" id="replace-fd-btn" onclick="replaceFDIPs()" disabled>替换反代IP</button><button class="append-fd-button" id="append-fd-btn" onclick="appendFDIPs()" disabled>追加反代IP</button></div></div><div id="message" class="message"></div>
-</div>
-<h2>IP列表 <span id="result-count"></span></h2><div class="ip-display-info" id="ip-display-info"></div><div id="region-filter" style="margin:15px 0;display:none;"></div><div class="ip-list" id="ip-list"><div class="ip-item">请选择端口和IP库，然后点击"开始测试延迟"加载IP列表</div></div><div class="show-more-section" id="show-more-section" style="display:none;"><button class="show-more-btn" id="show-more-btn" onclick="toggleShowMore()">显示更多</button></div>
+    const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>在线优选工具</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+${getCommonCSS()}
+body { justify-content: flex-start; padding: 2rem 1rem 8rem 1rem; }
+.container { max-width: 1000px; width: 100%; margin: 0 auto; }
+.card { padding: 1.5rem; margin-bottom: 1.5rem; }
+h3 { margin-top: 0; margin-bottom: 1.25rem; font-size: 1.25rem; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 0.75rem; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+@media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+.nav-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+.nav-brand { font-size: 1.5rem; font-weight: 700; background: linear-gradient(to right, #6366f1, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.stats-val { font-size: 1.25rem; font-weight: 600; color: var(--primary); }
+.stats-label { font-size: 0.85rem; color: var(--text-light); }
+.proxy-warning { color: #ef4444; font-weight: bold; }
+.ip-list { background: rgba(0,0,0,0.03); padding: 1rem; border-radius: 0.5rem; border: 1px solid var(--border); max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 0.9rem; }
+.ip-item { margin: 4px 0; padding: 4px 8px; border-radius: 4px; display: flex; justify-content: space-between; }
+.ip-item:hover { background: rgba(255,255,255,0.05); }
+.good-latency { color: #22c55e; }
+.medium-latency { color: #f59e0b; }
+.bad-latency { color: #ef4444; }
+.progress-container { background: rgba(0,0,0,0.1); border-radius: 2rem; height: 10px; overflow: hidden; margin: 1rem 0; display: flex; }
+.progress-bar-success { background: #22c55e; height: 100%; width: 0%; transition: width 0.3s ease; }
+.progress-bar-fail { background: #ef4444; height: 100%; width: 0%; transition: width 0.3s ease; }
+.btn-group { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
+.message { padding: 1rem; border-radius: 0.5rem; margin-top: 1rem; display: none; }
+.message.success { background: rgba(34, 197, 94, 0.1); color: #15803d; border: 1px solid rgba(34, 197, 94, 0.2); }
+.message.error { background: rgba(239, 68, 68, 0.1); color: #b91c1c; border: 1px solid rgba(239, 68, 68, 0.2); }
+.message.info { background: rgba(59, 130, 246, 0.1); color: #1d4ed8; border: 1px solid rgba(59, 130, 246, 0.2); }
+label { font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; display: block; }
+select, input[type="number"] { width: 100%; }
+.control-section { padding-bottom: 1.5rem; border-bottom: 1px dashed var(--border); margin-bottom: 1.5rem; }
+.control-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+</style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav-header">
+            <div class="nav-brand">在线优选 IP</div>
+            <div style="display:flex; gap:0.5rem;">
+                 <a href="/admin" class="btn btn-secondary" style="width:auto; padding: 0.5rem 1rem;"><i class="fas fa-cog"></i> 配置</a>
+                 <a href="/" class="btn btn-secondary" style="width:auto; padding: 0.5rem 1rem;"><i class="fas fa-arrow-left"></i> 首页</a>
+            </div>
+        </div>
+
+        ${!isChina ? `<div class="card" style="padding: 1rem; margin-bottom: 1.5rem;"><div style="display:flex; gap:1rem; align-items:center;"><i class="fas fa-exclamation-triangle" style="color:#ef4444; font-size:1.5rem;"></i><div><h4 style="margin:0; color:#ef4444;">代理环境警告</h4><p style="margin:0.25rem 0 0 0; font-size:0.9rem;">检测到您可能处于代理或 VPN 环境中（${country}），测速结果可能不准确。建议关闭代理后刷新页面。</p></div></div></div>` : ''}
+
+        <div class="card" id="status-card">
+            <h3><i class="fas fa-chart-bar" style="color:var(--primary)"></i> 状态概览</h3>
+            <div class="grid-3">
+                <div style="text-align:center;">
+                    <div class="stats-label">您的位置</div>
+                    <div class="stats-val ${countryDisplayClass}">${countryDisplayText}</div>
+                </div>
+                <div style="text-align:center;">
+                    <div class="stats-label">加载 IP 数</div>
+                    <div class="stats-val" id="ip-count">0</div>
+                </div>
+                <div style="text-align:center;">
+                    <div class="stats-label">有效结果</div>
+                    <div class="stats-val" id="result-count-val" style="color:#22c55e;">0</div>
+                </div>
+            </div>
+            <div style="margin-top: 1.5rem;">
+                <div style="display:flex; justify-content:space-between; font-size:0.85rem; color:var(--text-light); margin-bottom: 0.5rem;">
+                    <span id="progress-text">准备就绪</span>
+                    <span id="progress-percent">0%</span>
+                </div>
+                <div class="progress-container">
+                    <div class="progress-bar-success" id="progress-bar-success"></div>
+                    <div class="progress-bar-fail" id="progress-bar-fail"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3><i class="fas fa-sliders-h" style="color:#f59e0b"></i> 测速配置</h3>
+            
+            <div class="control-section">
+                <div class="grid-3">
+                    <div class="form-group">
+                        <label>IP 来源库</label>
+                        <select id="ip-source-select">
+                            <option value="official">Cloudflare 官方</option>
+                            <option value="as13335">AS13335 (Cloudflare)</option>
+                            <option value="as209242">AS209242 (ArvanCloud)</option>
+                            <option value="as24429">AS24429 (Alibaba)</option>
+                            <option value="as199524">AS199524 (G-Core)</option>
+                            <option value="local">本地文件上传</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>测速端口</label>
+                        <select id="port-select">
+                            <option value="443">443 (HTTPS)</option>
+                            <option value="2053">2053 (HTTPS)</option>
+                            <option value="2083">2083 (HTTPS)</option>
+                            <option value="2087">2087 (HTTPS)</option>
+                            <option value="2096">2096 (HTTPS)</option>
+                            <option value="80">80 (HTTP)</option>
+                            <option value="8080">8080 (HTTP)</option>
+                            <option value="8880">8880 (HTTP)</option>
+                            <option value="2052">2052 (HTTP)</option>
+                            <option value="2082">2082 (HTTP)</option>
+                            <option value="2086">2086 (HTTP)</option>
+                            <option value="2095">2095 (HTTP)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>本地文件</label>
+                        <div style="display:flex; gap:0.5rem;">
+                            <input type="file" id="local-file-input" accept=".txt,.json,.csv,.conf,.list" style="display:none;" onchange="handleFileUpload(this.files)">
+                            <button class="btn btn-secondary" onclick="document.getElementById('local-file-input').click()" style="width:100%; padding: 0.75rem;"><i class="fas fa-upload"></i> 选择文件</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="grid-2" style="margin-top:1rem;">
+                    <div class="form-group">
+                        <label>测试数量</label>
+                        <input type="number" id="count-input" value="50" min="1" max="500">
+                    </div>
+                    <div class="form-group">
+                        <label>并发线程</label>
+                        <input type="number" id="concurrency-input" value="6" min="1" max="20">
+                    </div>
+                </div>
+                
+                <div style="margin-top:1rem; display:none;" id="saved-files-wrapper">
+                    <label>已保存的列表</label>
+                    <div style="display:flex; gap:0.5rem;">
+                        <select id="saved-files-select" onchange="handleSavedFileSelect(this)"></select>
+                        <button class="btn btn-secondary" style="width:auto; padding:0 0.75rem;" onclick="deleteSavedFile()" id="delete-btn" disabled><i class="fas fa-trash"></i></button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="message" class="message"></div>
+        </div>
+
+        <div class="card" id="result-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                <h3><i class="fas fa-list-ul" style="color:#8b5cf6"></i> 测速结果</h3>
+                <span id="ip-display-info" style="font-size:0.85rem; color:var(--text-light);"></span>
+            </div>
+            
+            <div id="region-filter" style="margin-bottom:1rem; display:none; gap:0.5rem; flex-wrap:wrap;"></div>
+            
+            <div class="ip-list" id="ip-list">
+                <div style="text-align:center; color:var(--text-light); padding:2rem;">请配置参数并点击"开始测速"</div>
+            </div>
+            
+            <div style="margin-top:1rem; display:none; text-align:center;" id="show-more-section">
+                <button class="btn btn-secondary" style="width:auto;" onclick="toggleShowMore()" id="show-more-btn">显示更多</button>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn" style="flex:1; background:linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);" id="replace-cf-btn" onclick="replaceCFIPs()" disabled>
+                    <i class="fas fa-exchange-alt"></i> 替换优选 IP
+                </button>
+                <button class="btn" style="flex:1; background:linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);" id="append-cf-btn" onclick="appendCFIPs()" disabled>
+                    <i class="fas fa-plus"></i> 追加优选 IP
+                </button>
+                <button class="btn" style="flex:1; background:linear-gradient(135deg, #d946ef 0%, #c026d3 100%);" id="replace-fd-btn" onclick="replaceFDIPs()" disabled>
+                    <i class="fas fa-sync"></i> 替换反代 IP
+                </button>
+                <button class="btn" style="flex:1; background:linear-gradient(135deg, #ec4899 0%, #db2777 100%);" id="append-fd-btn" onclick="appendFDIPs()" disabled>
+                    <i class="fas fa-folder-plus"></i> 追加反代 IP
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div style="position: fixed; bottom: 2rem; left: 0; right: 0; display: flex; justify-content: center; pointer-events: none; z-index: 100;">
+        <button class="btn" id="test-btn" onclick="startTest()" style="pointer-events: auto; box-shadow: 0 10px 30px rgba(79, 70, 229, 0.4); width: auto; padding: 1rem 3rem; border-radius: 2rem;">
+            <i class="fas fa-play"></i> 开始测速
+        </button>
+    </div>
+
 <script>
 const LATENCY_CALIBRATION_FACTOR = 0.25;
 function calibrateLatency(rawLatency) { return Math.max(1, Math.round(rawLatency * LATENCY_CALIBRATION_FACTOR)); }
@@ -3028,54 +3243,51 @@ const LocalStorageKeys = { SAVED_FILES: 'cf-ip-saved-files', FILE_PREFIX: 'cf-ip
 let originalIPs = [], testResults = [], displayedResults = [], showingAll = false, currentDisplayType = 'loading', cloudflareLocations = {};
 const StorageKeys = { PORT: 'cf-ip-test-port', IP_SOURCE: 'cf-ip-test-source', COUNT: 'cf-ip-test-count', CONCURRENCY: 'cf-ip-test-concurrency' };
 function initializeLocalStorage(){if(!localStorage.getItem(LocalStorageKeys.SAVED_FILES)){localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify([]))}updateSavedFilesSelect()}
-function updateSavedFilesSelect(){const savedFilesSelect=document.getElementById('saved-files-select');const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');savedFilesSelect.innerHTML='<option value="">--选择已保存文件--</option>';savedFiles.forEach(file=>{const option=document.createElement('option');option.value=file.id;option.textContent=\`\${file.name} (\${file.ipCount}个IP, \${new Date(file.timestamp).toLocaleDateString()})\`;savedFilesSelect.appendChild(option)});updateFileManagementButtons()}
-function updateFileManagementButtons(){const savedFilesSelect=document.getElementById('saved-files-select');const renameBtn=document.getElementById('rename-btn');const deleteBtn=document.getElementById('delete-btn');const hasSelection=savedFilesSelect.value!=='';renameBtn.disabled=!hasSelection;deleteBtn.disabled=!hasSelection}
+function updateSavedFilesSelect(){const savedFilesSelect=document.getElementById('saved-files-select');const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');const wrapper=document.getElementById('saved-files-wrapper');if(savedFiles.length>0){wrapper.style.display='block'}else{wrapper.style.display='none'}savedFilesSelect.innerHTML='<option value="">-- 选择已保存文件 --</option>';savedFiles.forEach(file=>{const option=document.createElement('option');option.value=file.id;option.textContent=\`\${file.name} (\${file.ipCount}IP)\`;savedFilesSelect.appendChild(option)});updateFileManagementButtons()}
+function updateFileManagementButtons(){const savedFilesSelect=document.getElementById('saved-files-select');const deleteBtn=document.getElementById('delete-btn');const hasSelection=savedFilesSelect.value!=='';deleteBtn.disabled=!hasSelection}
 function handleSavedFileSelect(select){updateFileManagementButtons();if(select.value){document.getElementById('ip-source-select').value='local';loadSavedFile(select.value)}}
 function parseCIDRFormat(cidrString){try{const[network,prefixLength]=cidrString.split('/');const prefix=parseInt(prefixLength);if(isNaN(prefix)||prefix<8||prefix>32){return null}const ipRegex=/^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/;if(!ipRegex.test(network)){return null}const octets=network.split('.').map(Number);for(const octet of octets){if(octet<0||octet>255){return null}}return{network:network,prefixLength:prefix,type:'cidr'}}catch(error){return null}}
 function generateIPsFromCIDR(cidr,maxIPs=100){try{const[network,prefixLength]=cidr.split('/');const prefix=parseInt(prefixLength);const ipToInt=(ip)=>{return ip.split('.').reduce((acc,octet)=>(acc<<8)+parseInt(octet),0)>>>0};const intToIP=(int)=>{return[(int>>>24)&255,(int>>>16)&255,(int>>>8)&255,int&255].join('.')};const networkInt=ipToInt(network);const hostBits=32-prefix;const numHosts=Math.pow(2,hostBits);if(numHosts<=2){return[]}const maxHosts=numHosts-2;const actualCount=Math.min(maxIPs,maxHosts);const ips=new Set();if(maxHosts<=0){return[]}let attempts=0;const maxAttempts=actualCount*10;while(ips.size<actualCount&&attempts<maxAttempts){const randomOffset=Math.floor(Math.random()*maxHosts)+1;const randomIP=intToIP(networkInt+randomOffset);ips.add(randomIP);attempts++}return Array.from(ips)}catch(error){return[]}}
-function handleFileUpload(files){if(files.length===0)return;const file=files[0];const reader=new FileReader();reader.onload=function(e){const content=e.target.result;const fileName=file.name.replace(/\\.[^/.]+$/,"");const targetPort=document.getElementById('port-select').value;const parsedIPs=parseFileContent(content,targetPort);if(parsedIPs.length===0){showMessage('未能在文件中找到有效的IP地址','error');return}saveFileToLocalStorage(fileName,parsedIPs,content);document.getElementById('ip-source-select').value='local';loadIPsFromArray(parsedIPs);showFileLoadInfo(file.name,parsedIPs.length,file.size);showMessage(\`成功从文件 "\${file.name}" 加载 \${parsedIPs.length} 个IP地址\`,'success')};reader.onerror=function(){showMessage('文件读取失败','error')};reader.readAsText(file)}
+function handleFileUpload(files){if(files.length===0)return;const file=files[0];const reader=new FileReader();reader.onload=function(e){const content=e.target.result;const fileName=file.name.replace(/\\.[^/.]+$/,"");const targetPort=document.getElementById('port-select').value;const parsedIPs=parseFileContent(content,targetPort);if(parsedIPs.length===0){showMessage('未能在文件中找到有效的IP地址','error');return}saveFileToLocalStorage(fileName,parsedIPs,content);document.getElementById('ip-source-select').value='local';loadIPsFromArray(parsedIPs);showMessage(\`成功加载 \${parsedIPs.length} 个IP\`,'success')};reader.onerror=function(){showMessage('文件读取失败','error')};reader.readAsText(file)}
 function parseFileContent(content,targetPort){const lines=content.split('\\n');const ips=new Set();const userCount=parseInt(document.getElementById('count-input').value)||50;lines.forEach(line=>{line=line.trim();if(!line||line.startsWith('#')||line.startsWith('//'))return;const cidrInfo=parseCIDRFormat(line);if(cidrInfo){const maxIPsPerCIDR=Math.ceil(userCount/lines.length);const ipsFromCIDR=generateIPsFromCIDR(line,maxIPsPerCIDR);ipsFromCIDR.forEach(ip=>{const formattedIP=\`\${ip}:\${targetPort}\`;ips.add(formattedIP)});return}const parsedIP=parseIPLine(line,targetPort);if(parsedIP){if(Array.isArray(parsedIP)){parsedIP.forEach(ip=>ips.add(ip))}else{ips.add(parsedIP)}}});const ipArray=Array.from(ips);return userCount<ipArray.length?ipArray.slice(0,userCount):ipArray}
 function parseIPLine(line,targetPort){try{let ip='';let port=targetPort;let comment='';let mainPart=line;if(line.includes('#')){const parts=line.split('#');mainPart=parts[0].trim();comment=parts.slice(1).join('#').trim()}if(mainPart.includes(':')){const parts=mainPart.split(':');if(parts.length===2){ip=parts[0].trim();port=parts[1].trim()}else{return null}}else{ip=mainPart.trim()}if(!isValidIP(ip)){return null}const portNum=parseInt(port);if(isNaN(portNum)||portNum<1||portNum>65535){return null}if(comment){return\`\${ip}:\${port}#\${comment}\`}else{return\`\${ip}:\${port}\`}}catch(error){return null}}
 function isValidIP(ip){const ipv4Regex=/^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/;const match=ip.match(ipv4Regex);if(match){for(let i=1;i<=4;i++){const num=parseInt(match[i]);if(num<0||num>255){return false}}return true}return false}
 function saveFileToLocalStorage(fileName,ips,originalContent){const fileId='file_'+Date.now();const fileData={id:fileId,name:fileName,ips:ips,content:originalContent,ipCount:ips.length,timestamp:Date.now()};localStorage.setItem(LocalStorageKeys.FILE_PREFIX+fileId,JSON.stringify(fileData));const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');savedFiles.push({id:fileId,name:fileName,ipCount:ips.length,timestamp:Date.now()});localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify(savedFiles));updateSavedFilesSelect();document.getElementById('saved-files-select').value=fileId;updateFileManagementButtons()}
-function loadSavedFile(fileId){if(!fileId)return;const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showMessage('文件不存在','error');return}const parsedData=JSON.parse(fileData);const currentPort=document.getElementById('port-select').value;const updatedIPs=parsedData.ips.map(ip=>updateIPPort(ip,currentPort));document.getElementById('ip-source-select').value='local';loadIPsFromArray(updatedIPs);showMessage(\`已加载文件 "\${parsedData.name}"，共 \${parsedData.ips.length} 个IP地址\`,'success')}
+function loadSavedFile(fileId){if(!fileId)return;const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showMessage('文件不存在','error');return}const parsedData=JSON.parse(fileData);const currentPort=document.getElementById('port-select').value;const updatedIPs=parsedData.ips.map(ip=>updateIPPort(ip,currentPort));document.getElementById('ip-source-select').value='local';loadIPsFromArray(updatedIPs);showMessage(\`已加载 "\${parsedData.name}"\`,'success')};
 function updateIPPort(ipString,newPort){try{let ip='';let port=newPort;let comment='';if(ipString.includes('#')){const parts=ipString.split('#');const mainPart=parts[0].trim();comment=parts[1].trim();if(mainPart.includes(':')){const ipPortParts=mainPart.split(':');if(ipPortParts.length===2){ip=ipPortParts[0].trim()}else{return ipString}}else{ip=mainPart}}else{if(ipString.includes(':')){const ipPortParts=ipString.split(':');if(ipPortParts.length===2){ip=ipPortParts[0].trim()}else{return ipString}}else{ip=ipString}}if(comment){return\`\${ip}:\${port}#\${comment}\`}else{return\`\${ip}:\${port}\`}}catch(error){return ipString}}
-function loadIPsFromArray(ips){originalIPs=ips;testResults=[];displayedResults=[];showingAll=false;currentDisplayType='loading';document.getElementById('ip-count').textContent=ips.length+' 个';displayLoadedIPs();document.getElementById('test-btn').disabled=false;updateButtonStates()}
-function renameSavedFile(){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId){showMessage('请先选择一个文件','error');return}const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showMessage('文件不存在','error');return}const parsedData=JSON.parse(fileData);const newName=prompt('请输入新的文件名：',parsedData.name);if(!newName||newName.trim()==='')return;parsedData.name=newName.trim();localStorage.setItem(LocalStorageKeys.FILE_PREFIX+fileId,JSON.stringify(parsedData));const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');const fileIndex=savedFiles.findIndex(file=>file.id===fileId);if(fileIndex!==-1){savedFiles[fileIndex].name=newName.trim();localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify(savedFiles))}updateSavedFilesSelect();document.getElementById('saved-files-select').value=fileId;updateFileManagementButtons();showMessage('文件名已更新','success')}
-function deleteSavedFile(){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId){showMessage('请先选择一个文件','error');return}if(!confirm('确定要删除这个文件吗？此操作不可撤销。'))return;const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');const filteredFiles=savedFiles.filter(file=>file.id!==fileId);localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify(filteredFiles));localStorage.removeItem(LocalStorageKeys.FILE_PREFIX+fileId);updateSavedFilesSelect();updateFileManagementButtons();showMessage('文件已删除','success')}
-function showFileLoadInfo(fileName,ipCount,fileSize){const fileInfoDiv=document.createElement('div');fileInfoDiv.className='local-file-info';fileInfoDiv.innerHTML=\`<h4>📁 文件加载成功</h4><div class="local-file-stats"><div class="local-file-stat"><label>文件名:</label><span>\${fileName}</span></div><div class="local-file-stat"><label>IP数量:</label><span>\${ipCount} 个</span></div><div class="local-file-stat"><label>文件大小:</label><span>\${(fileSize/1024).toFixed(2)} KB</span></div></div><div style="margin-top: 8px; font-size: 12px; color: #666;">IP列表已加载完成，点击"开始测试"按钮开始测试</div>\`;const testControls=document.querySelector('.test-controls');const existingInfo=document.querySelector('.local-file-info');if(existingInfo){existingInfo.remove()}testControls.parentNode.insertBefore(fileInfoDiv,testControls)}
+function loadIPsFromArray(ips){originalIPs=ips;testResults=[];displayedResults=[];showingAll=false;currentDisplayType='loading';document.getElementById('ip-count').textContent=ips.length;displayLoadedIPs();document.getElementById('test-btn').disabled=false;updateButtonStates()}
+function deleteSavedFile(){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId)return;if(!confirm('确定删除？'))return;const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');const filteredFiles=savedFiles.filter(file=>file.id!==fileId);localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify(filteredFiles));localStorage.removeItem(LocalStorageKeys.FILE_PREFIX+fileId);updateSavedFilesSelect();updateFileManagementButtons();showMessage('文件已删除','success')}
 async function loadCloudflareLocations(){try{const response=await fetch(atob('aHR0cHM6Ly9zcGVlZC5jbG91ZGZsYXJlLmNvbS9sb2NhdGlvbnM='));if(response.ok){const locations=await response.json();cloudflareLocations={};locations.forEach(location=>{cloudflareLocations[location.iata]=location})}}catch(error){}}
-function initializeSettings(){const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');const savedPort=localStorage.getItem(StorageKeys.PORT);const savedIPSource=localStorage.getItem(StorageKeys.IP_SOURCE);const savedCount=localStorage.getItem(StorageKeys.COUNT);const savedConcurrency=localStorage.getItem(StorageKeys.CONCURRENCY);if(savedPort&&portSelect.querySelector(\`option[value="\${savedPort}"]\`)){portSelect.value=savedPort}else{portSelect.value='443'}if(savedIPSource&&ipSourceSelect.querySelector(\`option[value="\${savedIPSource}"]\`)){ipSourceSelect.value=savedIPSource}else{ipSourceSelect.value='official'}if(savedCount){countInput.value=savedCount}else{countInput.value='50'}if(savedConcurrency){concurrencyInput.value=savedConcurrency}else{concurrencyInput.value='6'}portSelect.addEventListener('change',function(){localStorage.setItem(StorageKeys.PORT,this.value);if(originalIPs.length>0){const newPort=this.value;const updatedIPs=originalIPs.map(ip=>updateIPPort(ip,newPort));loadIPsFromArray(updatedIPs)}});ipSourceSelect.addEventListener('change',function(){localStorage.setItem(StorageKeys.IP_SOURCE,this.value)});countInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.COUNT,this.value)});concurrencyInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.CONCURRENCY,this.value)})}
+function initializeSettings(){const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');const savedPort=localStorage.getItem(StorageKeys.PORT);const savedIPSource=localStorage.getItem(StorageKeys.IP_SOURCE);const savedCount=localStorage.getItem(StorageKeys.COUNT);const savedConcurrency=localStorage.getItem(StorageKeys.CONCURRENCY);if(savedPort)portSelect.value=savedPort;if(savedIPSource)ipSourceSelect.value=savedIPSource;if(savedCount)countInput.value=savedCount;if(savedConcurrency)concurrencyInput.value=savedConcurrency;portSelect.addEventListener('change',function(){localStorage.setItem(StorageKeys.PORT,this.value);if(originalIPs.length>0){const newPort=this.value;const updatedIPs=originalIPs.map(ip=>updateIPPort(ip,newPort));loadIPsFromArray(updatedIPs)}});ipSourceSelect.addEventListener('change',function(){localStorage.setItem(StorageKeys.IP_SOURCE,this.value)});countInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.COUNT,this.value)});concurrencyInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.CONCURRENCY,this.value)})}
 document.addEventListener('DOMContentLoaded',async function(){await loadCloudflareLocations();initializeSettings();initializeLocalStorage()});
 function shuffleArray(array){const newArray=[...array];for(let i=newArray.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[newArray[i],newArray[j]]=[newArray[j],newArray[i]]}return newArray}
 function toggleShowMore(){if(currentDisplayType==='testing'){return}showingAll=!showingAll;if(currentDisplayType==='loading'){displayLoadedIPs()}else if(currentDisplayType==='results'){displayResults()}}
-function displayLoadedIPs(){const ipList=document.getElementById('ip-list');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(originalIPs.length===0){ipList.innerHTML='<div class="ip-item">加载IP列表失败，请重试</div>';showMoreSection.style.display='none';ipDisplayInfo.textContent='';return}const displayCount=showingAll?originalIPs.length:Math.min(originalIPs.length,16);const displayIPs=originalIPs.slice(0,displayCount);const randomInfo=currentDisplayType==='loading'?'（随机选择）':'';if(originalIPs.length<=16){ipDisplayInfo.textContent=\`显示全部 \${originalIPs.length} 个IP\${randomInfo}\`;showMoreSection.style.display='none'}else{ipDisplayInfo.textContent=\`显示前 \${displayCount} 个IP，共加载 \${originalIPs.length} 个IP\${randomInfo}\`;if(currentDisplayType!=='testing'){showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多';showMoreBtn.disabled=false}else{showMoreSection.style.display='none'}}ipList.innerHTML=displayIPs.map(ip=>\`<div class="ip-item">\${ip}</div>\`).join('')}
+function displayLoadedIPs(){const ipList=document.getElementById('ip-list');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(originalIPs.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">加载IP列表失败</div>';showMoreSection.style.display='none';ipDisplayInfo.textContent='';return}const displayCount=showingAll?originalIPs.length:Math.min(originalIPs.length,16);const displayIPs=originalIPs.slice(0,displayCount);if(originalIPs.length<=16){ipDisplayInfo.textContent=\`共 \${originalIPs.length} 个IP\`;showMoreSection.style.display='none'}else{ipDisplayInfo.textContent=\`显示 \${displayCount} / \${originalIPs.length} 个IP\`;if(currentDisplayType!=='testing'){showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多';showMoreBtn.disabled=false}else{showMoreSection.style.display='none'}}ipList.innerHTML=displayIPs.map(ip=>\`<div class="ip-item"><span>\${ip}</span></div>\`).join('')}
 function showMessage(text,type='success'){const messageDiv=document.getElementById('message');messageDiv.textContent=text;messageDiv.className=\`message \${type}\`;messageDiv.style.display='block';setTimeout(()=>{messageDiv.style.display='none'},5000)}
 function updateButtonStates(){const replaceCfBtn=document.getElementById('replace-cf-btn');const appendCfBtn=document.getElementById('append-cf-btn');const replaceFdBtn=document.getElementById('replace-fd-btn');const appendFdBtn=document.getElementById('append-fd-btn');const hasResults=displayedResults.length>0;replaceCfBtn.disabled=!hasResults;appendCfBtn.disabled=!hasResults;replaceFdBtn.disabled=!hasResults;appendFdBtn.disabled=!hasResults}
-function disableAllButtons(){const testBtn=document.getElementById('test-btn');const replaceCfBtn=document.getElementById('replace-cf-btn');const appendCfBtn=document.getElementById('append-cf-btn');const replaceFdBtn=document.getElementById('replace-fd-btn');const appendFdBtn=document.getElementById('append-fd-btn');const configBtn=document.getElementById('config-btn');const homeBtn=document.getElementById('home-btn');const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');testBtn.disabled=true;replaceCfBtn.disabled=true;appendCfBtn.disabled=true;replaceFdBtn.disabled=true;appendFdBtn.disabled=true;configBtn.disabled=true;homeBtn.disabled=true;portSelect.disabled=true;ipSourceSelect.disabled=true;countInput.disabled=true;concurrencyInput.disabled=true}
-function enableButtons(){const testBtn=document.getElementById('test-btn');const configBtn=document.getElementById('config-btn');const homeBtn=document.getElementById('home-btn');const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');testBtn.disabled=false;configBtn.disabled=false;homeBtn.disabled=false;portSelect.disabled=false;ipSourceSelect.disabled=false;countInput.disabled=false;concurrencyInput.disabled=false;updateButtonStates()}
+function disableAllButtons(){document.querySelectorAll('button, select, input').forEach(el=>el.disabled=true)}
+function enableButtons(){document.querySelectorAll('button, select, input').forEach(el=>{if(el.id!=='delete-btn')el.disabled=false});updateButtonStates();updateFileManagementButtons()}
 function formatIPForSave(result){const port=document.getElementById('port-select').value;let ip=result.ip;let countryCode=result.locationCode||'XX';let countryName=getCountryName(countryCode);return\`\${ip}:\${port}#\${countryName}|\${countryCode}\`}
 function formatIPForFD(result){const port=document.getElementById('port-select').value;let countryCode=result.locationCode||'XX';let countryName=getCountryName(countryCode);return\`\${result.ip}:\${port}#\${countryName}\`}
 function getCountryName(countryCode){const countryMap={'US':'美国','SG':'新加坡','DE':'德国','JP':'日本','KR':'韩国','HK':'香港','TW':'台湾','GB':'英国','FR':'法国','IN':'印度','BR':'巴西','CA':'加拿大','AU':'澳大利亚','NL':'荷兰','CH':'瑞士','SE':'瑞典','IT':'意大利','ES':'西班牙','RU':'俄罗斯','ZA':'南非','MX':'墨西哥','MY':'马来西亚','TH':'泰国','ID':'印度尼西亚','VN':'越南','PH':'菲律宾','TR':'土耳其','SA':'沙特阿拉伯','AE':'阿联酋','EG':'埃及','NG':'尼日利亚','IL':'以色列','PL':'波兰','UA':'乌克兰','CZ':'捷克','RO':'罗马尼亚','GR':'希腊','PT':'葡萄牙','DK':'丹麦','FI':'芬兰','NO':'挪威','AT':'奥地利','BE':'比利时','IE':'爱尔兰','LU':'卢森堡','CY':'塞浦路斯','MT':'马耳他','IS':'冰岛','CN':'中国'};return countryMap[countryCode]||countryCode}
-async function saveIPs(action,formatFunction,buttonId,successMessage){let ipsToSave=[];if(document.getElementById('region-filter')&&document.getElementById('region-filter').style.display!=='none'){ipsToSave=displayedResults}else{ipsToSave=testResults}if(ipsToSave.length===0){showMessage('没有可保存的IP结果','error');return}const button=document.getElementById(buttonId);const originalText=button.textContent;disableAllButtons();button.textContent='保存中...';try{const saveCount=Math.min(ipsToSave.length,6);const ips=ipsToSave.slice(0,saveCount).map(result=>formatFunction(result));const response=await fetch(\`?action=\${action}\`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ips})});const data=await response.json();if(data.success){showMessage(successMessage+'（已保存前'+saveCount+'个最优IP）','success')}else{showMessage(data.error||'保存失败','error')}}catch(error){showMessage('保存失败: '+error.message,'error')}finally{button.textContent=originalText;enableButtons()}}
-async function replaceCFIPs(){await saveIPs('replace-cf',formatIPForSave,'replace-cf-btn','成功替换优选IP列表')}
-async function appendCFIPs(){await saveIPs('append-cf',formatIPForSave,'append-cf-btn','成功追加优选IP列表')}
-async function replaceFDIPs(){await saveIPs('replace-fd',formatIPForFD,'replace-fd-btn','成功替换反代IP列表')}
-async function appendFDIPs(){await saveIPs('append-fd',formatIPForFD,'append-fd-btn','成功追加反代IP列表')}
-function goConfig(){window.location.href=\`/admin\`}
-function goHome(){window.location.href=\`/\`}
+async function saveIPs(action,formatFunction,buttonId,successMessage){let ipsToSave=[];if(document.getElementById('region-filter')&&document.getElementById('region-filter').style.display!=='none'&&document.querySelector('.region-btn.active').getAttribute('data-region')!=='all'){ipsToSave=displayedResults}else{ipsToSave=testResults}if(ipsToSave.length===0){showMessage('无有效IP可保存','error');return}const button=document.getElementById(buttonId);const originalText=button.innerHTML;disableAllButtons();button.textContent='保存中...';try{const saveCount=Math.min(ipsToSave.length,6);const ips=ipsToSave.slice(0,saveCount).map(result=>formatFunction(result));const response=await fetch(\`?action=\${action}\`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ips})});const data=await response.json();if(data.success){showMessage(successMessage+' (前'+saveCount+'个)','success')}else{showMessage(data.error||'保存失败','error')}}catch(error){showMessage('保存失败','error')}finally{button.innerHTML=originalText;enableButtons()}}
+async function replaceCFIPs(){await saveIPs('replace-cf',formatIPForSave,'replace-cf-btn','已替换优选 IP')}
+async function appendCFIPs(){await saveIPs('append-cf',formatIPForSave,'append-cf-btn','已追加优选 IP')}
+async function replaceFDIPs(){await saveIPs('replace-fd',formatIPForFD,'replace-fd-btn','已替换反代 IP')}
+async function appendFDIPs(){await saveIPs('append-fd',formatIPForFD,'append-fd-btn','已追加反代 IP')}
 function isRetriableError(error){if(!error)return false;const errorMessage=error.message||error.toString();const retryablePatterns=['timeout','abort','network','fetch','failed','load failed','connection','socket','reset'];const nonRetryablePatterns=['HTTP 4','HTTP 5','404','500','502','503','certificate','SSL','TLS','CORS','blocked'];const isRetryable=retryablePatterns.some(pattern=>errorMessage.toLowerCase().includes(pattern.toLowerCase()));const isNonRetryable=nonRetryablePatterns.some(pattern=>errorMessage.toLowerCase().includes(pattern.toLowerCase()));return isRetryable&&!isNonRetryable}
 async function smartRetry(operation,maxAttempts=3,baseDelay=200,timeout=5000){let lastError;for(let attempt=1;attempt<=maxAttempts;attempt++){const controller=new AbortController();const timeoutId=setTimeout(()=>controller.abort(),timeout);try{const result=await Promise.race([operation(controller.signal),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Operation timeout')),timeout))]);clearTimeout(timeoutId);if(result&&result.success!==false){return result}if(result&&result.error){if(result.error.includes('HTTP 4')||result.error.includes('HTTP 5')){return result}}lastError=result?result.error:new Error('Operation failed')}catch(error){clearTimeout(timeoutId);lastError=error;if(!error.message.includes('network')&&!error.message.includes('timeout')&&!error.message.includes('fetch')){throw error}}if(attempt<maxAttempts){const delay=baseDelay*Math.pow(2,attempt-1)+Math.random()*100;await new Promise(resolve=>setTimeout(resolve,delay))}}throw lastError}
-async function testIP(ip,port){const timeout=3000;const parsedIP=parseIPFormat(ip,port);if(!parsedIP){return null}const latencyResult=await smartRetry((signal)=>singleLatencyTest(parsedIP.host,parsedIP.port,timeout,signal),2,200,timeout+1000);if(!latencyResult){return null}const locationCode=cloudflareLocations[latencyResult.colo]?cloudflareLocations[latencyResult.colo].cca2:latencyResult.colo;const countryName=getCountryName(locationCode);const typeText=latencyResult.type==='official'?'官方优选':'反代优选';const calibratedLatency=calibrateLatency(latencyResult.latency);let display;if(latencyResult.type==='official'){display=\`\${parsedIP.host}:\${parsedIP.port}#\${countryName}|\${locationCode} \${typeText} 延迟:\${calibratedLatency}ms\`}else{display=\`\${parsedIP.host}:\${parsedIP.port}#\${countryName} \${typeText} 延迟:\${calibratedLatency}ms\`}return{ip:parsedIP.host,port:parsedIP.port,latency:latencyResult.latency,calibratedLatency:calibratedLatency,colo:latencyResult.colo,type:latencyResult.type,locationCode:locationCode,comment:\`\${countryName} \${typeText}\`,display:display}}
+async function testIP(ip,port){const timeout=3000;const parsedIP=parseIPFormat(ip,port);if(!parsedIP){return null}const latencyResult=await smartRetry((signal)=>singleLatencyTest(parsedIP.host,parsedIP.port,timeout,signal),2,200,timeout+1000);if(!latencyResult){return null}const locationCode=cloudflareLocations[latencyResult.colo]?cloudflareLocations[latencyResult.colo].cca2:latencyResult.colo;const countryName=getCountryName(locationCode);const typeText=latencyResult.type==='official'?'官方':'反代';const calibratedLatency=calibrateLatency(latencyResult.latency);let display;if(latencyResult.type==='official'){display=\`\${parsedIP.host}:\${parsedIP.port}#\${countryName}|\${locationCode} \${typeText} \${calibratedLatency}ms\`}else{display=\`\${parsedIP.host}:\${parsedIP.port}#\${countryName} \${typeText} \${calibratedLatency}ms\`}return{ip:parsedIP.host,port:parsedIP.port,latency:latencyResult.latency,calibratedLatency:calibratedLatency,colo:latencyResult.colo,type:latencyResult.type,locationCode:locationCode,comment:\`\${countryName} \${typeText}\`,display:display}}
 function parseIPFormat(ipString,defaultPort){try{let host,port,comment;let mainPart=ipString;if(ipString.includes('#')){const parts=ipString.split('#');mainPart=parts[0];comment=parts[1]}if(mainPart.includes(':')){const parts=mainPart.split(':');host=parts[0];port=parseInt(parts[1])}else{host=mainPart;port=parseInt(defaultPort)}if(!host||!port||isNaN(port)){return null}return{host:host.trim(),port:port,comment:comment?comment.trim():null}}catch(error){return null}}
 async function singleLatencyTest(ip,port,timeout,abortSignal){const controller=new AbortController();const timeoutId=setTimeout(()=>controller.abort(),timeout);if(abortSignal){abortSignal.addEventListener('abort',()=>controller.abort())}const startTime=Date.now();try{const parts=ip.split('.').map(part=>{const hex=parseInt(part,10).toString(16);return hex.length===1?'0'+hex:hex});const nip=parts.join('');const response=await fetch(\`https://\${nip}.${nipDomain}:\${port}/cdn-cgi/trace\`,{signal:controller.signal,mode:'cors'});clearTimeout(timeoutId);if(response.status===200){const latency=Date.now()-startTime;const responseText=await response.text();const traceData=parseTraceResponse(responseText);if(traceData&&traceData.ip&&traceData.colo){const responseIP=traceData.ip;let ipType='official';if(responseIP.includes(':')||responseIP===ip){ipType='proxy'}return{ip:ip,port:port,latency:latency,colo:traceData.colo,type:ipType,responseIP:responseIP}}}return null}catch(error){clearTimeout(timeoutId);const latency=Date.now()-startTime;if(latency<timeout-100){return{ip:ip,port:port,latency:latency,colo:'UNKNOWN',type:'unknown',responseIP:null}}return null}}
 function parseTraceResponse(responseText){try{const lines=responseText.split('\\n');const data={};for(const line of lines){const trimmedLine=line.trim();if(trimmedLine&&trimmedLine.includes('=')){const[key,value]=trimmedLine.split('=',2);data[key]=value}}return data}catch(error){return null}}
-async function testIPsWithConcurrency(ips,port,maxConcurrency=6){const results=[];const totalIPs=ips.length;let completedTests=0;let activeWorkers=0;let currentIndex=0;const progressBar=document.getElementById('progress-bar');const progressText=document.getElementById('progress-text');const workers=Array(Math.min(maxConcurrency,ips.length)).fill().map(async(_,workerId)=>{while(currentIndex<ips.length){const index=currentIndex++;if(index>=ips.length)break;const ip=ips[index];activeWorkers++;try{await new Promise(resolve=>setTimeout(resolve,Math.random()*100));const result=await testIP(ip,port);if(result){results.push(result)}}catch(error){}finally{activeWorkers--;completedTests++;const progress=(completedTests/totalIPs)*100;progressBar.style.width=progress+'%';progressText.textContent=\`\${completedTests}/\${totalIPs} (\${progress.toFixed(1)}%) - 有效IP: \${results.length} - 并发: \${activeWorkers}\`;await new Promise(resolve=>setTimeout(resolve,0))}}});await Promise.all(workers);return results}
-function displayResults(){const ipList=document.getElementById('ip-list');const resultCount=document.getElementById('result-count');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(testResults.length===0){ipList.innerHTML='<div class="ip-item">未找到有效的IP</div>';resultCount.textContent='';ipDisplayInfo.textContent='';showMoreSection.style.display='none';displayedResults=[];updateButtonStates();return}const maxDisplayCount=showingAll?testResults.length:Math.min(testResults.length,16);displayedResults=testResults.slice(0,maxDisplayCount);if(testResults.length<=16){resultCount.textContent='(共测试出 '+testResults.length+' 个有效IP)';ipDisplayInfo.textContent='显示全部 '+testResults.length+' 个测试结果';showMoreSection.style.display='none'}else{resultCount.textContent='(共测试出 '+testResults.length+' 个有效IP)';ipDisplayInfo.textContent='显示前 '+maxDisplayCount+' 个测试结果，共 '+testResults.length+' 个有效IP';showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多';showMoreBtn.disabled=false}const resultsHTML=displayedResults.map(result=>{const calibratedLatency=result.calibratedLatency||calibrateLatency(result.latency);let latencyClass='good-latency';if(calibratedLatency>200)latencyClass='bad-latency';else if(calibratedLatency>100)latencyClass='medium-latency';return\`<div class="ip-item"><span class="\${latencyClass}">\${result.display}</span></div>\`}).join('');ipList.innerHTML=resultsHTML;updateButtonStates()}
-function createRegionFilter(){const uniqueRegions=[...new Set(testResults.map(result=>result.locationCode))];uniqueRegions.sort();const filterContainer=document.getElementById('region-filter');if(!filterContainer)return;if(uniqueRegions.length===0){filterContainer.style.display='none';return}let filterHTML='<h3>地区筛选：</h3><div class="region-buttons">';filterHTML+='<button class="region-btn active" data-region="all">全部 ('+testResults.length+')</button>';uniqueRegions.forEach(region=>{const count=testResults.filter(r=>r.locationCode===region).length;filterHTML+='<button class="region-btn" data-region="'+region+'">'+region+' ('+count+')</button>'});filterHTML+='</div>';filterContainer.innerHTML=filterHTML;filterContainer.style.display='block';document.querySelectorAll('.region-btn').forEach(button=>{button.addEventListener('click',function(){document.querySelectorAll('.region-btn').forEach(btn=>{btn.classList.remove('active')});this.classList.add('active');const selectedRegion=this.getAttribute('data-region');if(selectedRegion==='all'){displayedResults=[...testResults]}else{displayedResults=testResults.filter(result=>result.locationCode===selectedRegion)}showingAll=false;displayFilteredResults()})})}
-function displayFilteredResults(){const ipList=document.getElementById('ip-list');const resultCount=document.getElementById('result-count');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(displayedResults.length===0){ipList.innerHTML='<div class="ip-item">未找到有效的IP</div>';resultCount.textContent='';ipDisplayInfo.textContent='';showMoreSection.style.display='none';updateButtonStates();return}const maxDisplayCount=showingAll?displayedResults.length:Math.min(displayedResults.length,16);const currentResults=displayedResults.slice(0,maxDisplayCount);const totalCount=testResults.length;const filteredCount=displayedResults.length;if(filteredCount<=16){resultCount.textContent='(共测试出 '+totalCount+' 个有效IP，筛选出 '+filteredCount+' 个)';ipDisplayInfo.textContent='显示全部 '+filteredCount+' 个筛选结果';showMoreSection.style.display='none'}else{resultCount.textContent='(共测试出 '+totalCount+' 个有效IP，筛选出 '+filteredCount+' 个)';ipDisplayInfo.textContent='显示前 '+maxDisplayCount+' 个筛选结果，共 '+filteredCount+' 个';showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多';showMoreBtn.disabled=false}const resultsHTML=currentResults.map(result=>{const calibratedLatency=result.calibratedLatency||calibrateLatency(result.latency);let latencyClass='good-latency';if(calibratedLatency>200)latencyClass='bad-latency';else if(calibratedLatency>100)latencyClass='medium-latency';return\`<div class="ip-item"><span class="\${latencyClass}">\${result.display}</span></div>\`}).join('');ipList.innerHTML=resultsHTML;updateButtonStates()}
+async function testIPsWithConcurrency(ips,port,maxConcurrency=6){const results=[];const totalIPs=ips.length;let completedTests=0;let activeWorkers=0;let currentIndex=0;let successCount=0;let failCount=0;const validCountLabel=document.getElementById('result-count-val');const progressBarSuccess=document.getElementById('progress-bar-success');const progressBarFail=document.getElementById('progress-bar-fail');const progressText=document.getElementById('progress-text');const progressPercent=document.getElementById('progress-percent');const workers=Array(Math.min(maxConcurrency,ips.length)).fill().map(async(_,workerId)=>{while(currentIndex<ips.length){const index=currentIndex++;if(index>=ips.length)break;const ip=ips[index];activeWorkers++;try{await new Promise(resolve=>setTimeout(resolve,Math.random()*100));const result=await testIP(ip,port);if(result){results.push(result);successCount++}else{failCount++}}catch(error){failCount++}finally{activeWorkers--;completedTests++;const successPercentVal=(successCount/totalIPs)*100;const failPercentVal=(failCount/totalIPs)*100;progressBarSuccess.style.width=successPercentVal+'%';progressBarFail.style.width=failPercentVal+'%';validCountLabel.textContent=successCount;progressPercent.textContent=Math.round((completedTests/totalIPs)*100)+'%';progressText.textContent=\`进度: \${completedTests}/\${totalIPs}\`;await new Promise(resolve=>setTimeout(resolve,0))}}});await Promise.all(workers);return results}
+function displayResults(){const ipList=document.getElementById('ip-list');const resultCountVal=document.getElementById('result-count-val');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(testResults.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">无有效IP</div>';resultCountVal.textContent='0';ipDisplayInfo.textContent='';showMoreSection.style.display='none';displayedResults=[];updateButtonStates();return}const maxDisplayCount=showingAll?testResults.length:Math.min(testResults.length,16);displayedResults=testResults.slice(0,maxDisplayCount);resultCountVal.textContent=testResults.length;if(testResults.length<=16){ipDisplayInfo.textContent=\`共 \${testResults.length} 个结果\`;showMoreSection.style.display='none'}else{ipDisplayInfo.textContent=\`显示 \${maxDisplayCount} / \${testResults.length} 个结果\`;showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多';showMoreBtn.disabled=false}const resultsHTML=displayedResults.map(result=>{const calibratedLatency=result.calibratedLatency||calibrateLatency(result.latency);let latencyClass='good-latency';if(calibratedLatency>200)latencyClass='bad-latency';else if(calibratedLatency>100)latencyClass='medium-latency';return\`<div class="ip-item"><span class="\${latencyClass}">\${result.display}</span></div>\`}).join('');ipList.innerHTML=resultsHTML;updateButtonStates()}
+function createRegionFilter(){const uniqueRegions=[...new Set(testResults.map(result=>result.locationCode))];uniqueRegions.sort();const filterContainer=document.getElementById('region-filter');if(!filterContainer)return;if(uniqueRegions.length===0){filterContainer.style.display='none';return}let filterHTML='<button class="btn btn-secondary region-btn active" style="width:auto; padding:0.25rem 0.75rem; font-size:0.85rem;" data-region="all">全部</button>';uniqueRegions.forEach(region=>{const count=testResults.filter(r=>r.locationCode===region).length;filterHTML+=\`<button class="btn btn-secondary region-btn" style="width:auto; padding:0.25rem 0.75rem; font-size:0.85rem;" data-region="\${region}">\${region}(\${count})</button>\`});filterContainer.innerHTML=filterHTML;filterContainer.style.display='flex';document.querySelectorAll('.region-btn').forEach(button=>{button.addEventListener('click',function(e){e.preventDefault();document.querySelectorAll('.region-btn').forEach(btn=>{btn.classList.remove('active');btn.style.background='transparent';btn.style.color='var(--text)'});this.classList.add('active');this.style.background='var(--primary)';this.style.color='white';const selectedRegion=this.getAttribute('data-region');if(selectedRegion==='all'){displayedResults=[...testResults]}else{displayedResults=testResults.filter(result=>result.locationCode===selectedRegion)}showingAll=false;displayFilteredResults()})})}
+function displayFilteredResults(){const ipList=document.getElementById('ip-list');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(displayedResults.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">无结果</div>';showMoreSection.style.display='none';updateButtonStates();return}const maxDisplayCount=showingAll?displayedResults.length:Math.min(displayedResults.length,16);const currentResults=displayedResults.slice(0,maxDisplayCount);const filteredCount=displayedResults.length;if(filteredCount<=16){ipDisplayInfo.textContent=\`筛选: \${filteredCount} 个\`;showMoreSection.style.display='none'}else{ipDisplayInfo.textContent=\`显示 \${maxDisplayCount} / \${filteredCount} 个\`;showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多'}const resultsHTML=currentResults.map(result=>{const calibratedLatency=result.calibratedLatency||calibrateLatency(result.latency);let latencyClass='good-latency';if(calibratedLatency>200)latencyClass='bad-latency';else if(calibratedLatency>100)latencyClass='medium-latency';return\`<div class="ip-item"><span class="\${latencyClass}">\${result.display}</span></div>\`}).join('');ipList.innerHTML=resultsHTML;updateButtonStates()}
 async function loadIPs(ipSource,port,count){try{const response=await fetch(\`?loadIPs=\${ipSource}&port=\${port}&count=\${count}\`,{method:'GET'});if(!response.ok){throw new Error('Failed to load IPs')}const data=await response.json();return data.ips||[]}catch(error){return[]}}
-async function startTest(){const testBtn=document.getElementById('test-btn');const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');const progressBar=document.getElementById('progress-bar');const progressText=document.getElementById('progress-text');const ipList=document.getElementById('ip-list');const resultCount=document.getElementById('result-count');const ipCount=document.getElementById('ip-count');const ipDisplayInfo=document.getElementById('ip-display-info');const showMoreSection=document.getElementById('show-more-section');const selectedPort=portSelect.value;const selectedIPSource=ipSourceSelect.value;const selectedCount=parseInt(countInput.value)||50;const selectedConcurrency=parseInt(concurrencyInput.value)||6;localStorage.setItem(StorageKeys.PORT,selectedPort);localStorage.setItem(StorageKeys.IP_SOURCE,selectedIPSource);localStorage.setItem(StorageKeys.COUNT,selectedCount);localStorage.setItem(StorageKeys.CONCURRENCY,selectedConcurrency);testBtn.disabled=true;testBtn.textContent='加载IP列表...';portSelect.disabled=true;ipSourceSelect.disabled=true;countInput.disabled=true;concurrencyInput.disabled=true;testResults=[];displayedResults=[];showingAll=false;currentDisplayType='loading';ipList.innerHTML='<div class="ip-item">正在加载IP列表，请稍候...</div>';ipDisplayInfo.textContent='';showMoreSection.style.display='none';updateButtonStates();progressBar.style.width='0%';let ipSourceName='';switch(selectedIPSource){case'official':ipSourceName='CF官方';break;case'as13335':ipSourceName='AS13335';break;case'as209242':ipSourceName='AS209242';break;case'as24429':ipSourceName='Alibaba';break;case'as199524':ipSourceName='G-Core';break;case'local':ipSourceName='本地上传';break;default:ipSourceName='未知'}progressText.textContent='正在加载 '+ipSourceName+' IP列表...';if(selectedIPSource==='local'){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId){if(originalIPs.length===0){showMessage('请先上传IP列表文件或选择已保存的文件','error');testBtn.disabled=false;testBtn.textContent='开始测试延迟';portSelect.disabled=false;ipSourceSelect.disabled=false;countInput.disabled=false;concurrencyInput.disabled=false;progressText.textContent='未加载IP列表';return}const allIPs=[...originalIPs];const shuffled=shuffleArray(allIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled}else{const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showMessage('文件不存在，请重新上传','error');testBtn.disabled=false;testBtn.textContent='开始测试延迟';portSelect.disabled=false;ipSourceSelect.disabled=false;countInput.disabled=false;concurrencyInput.disabled=false;progressText.textContent='文件不存在';return}const parsedData=JSON.parse(fileData);const currentPort=selectedPort;const parsedIPs=parseFileContent(parsedData.content,currentPort);if(parsedIPs.length===0){showMessage('文件中没有有效的IP地址','error');testBtn.disabled=false;testBtn.textContent='开始测试延迟';portSelect.disabled=false;ipSourceSelect.disabled=false;countInput.disabled=false;concurrencyInput.disabled=false;progressText.textContent='无有效IP';return}const shuffled=shuffleArray(parsedIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled;showMessage(\`从文件中随机选择 \${originalIPs.length} 个IP进行测试\`,'info')}}else{originalIPs=await loadIPs(selectedIPSource,selectedPort,selectedCount)}if(originalIPs.length===0){ipList.innerHTML='<div class="ip-item">加载IP列表失败，请重试</div>';ipCount.textContent='0 个';testBtn.disabled=false;testBtn.textContent='开始测试延迟';portSelect.disabled=false;ipSourceSelect.disabled=false;countInput.disabled=false;concurrencyInput.disabled=false;progressText.textContent='加载失败';return}ipCount.textContent=originalIPs.length+' 个';displayLoadedIPs();testBtn.textContent='测试中...';progressText.textContent='开始测试端口 '+selectedPort+'...';currentDisplayType='testing';showMoreSection.style.display='none';const results=await testIPsWithConcurrency(originalIPs,selectedPort,selectedConcurrency);testResults=results.sort((a,b)=>a.latency-b.latency);currentDisplayType='results';showingAll=false;displayResults();createRegionFilter();testBtn.disabled=false;testBtn.textContent='重新测试';portSelect.disabled=false;ipSourceSelect.disabled=false;countInput.disabled=false;concurrencyInput.disabled=false;progressText.textContent='完成 - 有效IP: '+testResults.length+'/'+originalIPs.length+' (端口: '+selectedPort+', IP库: '+ipSourceName+')'}
+function scrollToElement(id){const el=document.getElementById(id);if(el){el.scrollIntoView({behavior:'smooth',block:'start'})}}
+async function startTest(){const testBtn=document.getElementById('test-btn');const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');const progressBarSuccess=document.getElementById('progress-bar-success');const progressBarFail=document.getElementById('progress-bar-fail');const progressText=document.getElementById('progress-text');const ipList=document.getElementById('ip-list');const ipCount=document.getElementById('ip-count');const resultCountVal=document.getElementById('result-count-val');const showMoreSection=document.getElementById('show-more-section');const selectedPort=portSelect.value;const selectedIPSource=ipSourceSelect.value;const selectedCount=parseInt(countInput.value)||50;const selectedConcurrency=parseInt(concurrencyInput.value)||6;localStorage.setItem(StorageKeys.PORT,selectedPort);localStorage.setItem(StorageKeys.IP_SOURCE,selectedIPSource);localStorage.setItem(StorageKeys.COUNT,selectedCount);localStorage.setItem(StorageKeys.CONCURRENCY,selectedConcurrency);testBtn.disabled=true;testBtn.innerHTML='<i class="fas fa-spinner fa-spin"></i> 处理中...';disableAllButtons();testResults=[];displayedResults=[];showingAll=false;currentDisplayType='loading';ipList.innerHTML='<div style="text-align:center;padding:1rem;">正在加载IP列表...</div>';showMoreSection.style.display='none';progressBarSuccess.style.width='0%';progressBarFail.style.width='0%';resultCountVal.textContent='0';if(window.innerWidth<768)scrollToElement('status-card');let ipSourceName='';switch(selectedIPSource){case'official':ipSourceName='Official';break;case'as13335':ipSourceName='AS13335';break;case'as209242':ipSourceName='AS209242';break;case'as24429':ipSourceName='Alibaba';break;case'as199524':ipSourceName='G-Core';break;case'local':ipSourceName='本地';break;default:ipSourceName='未知'}progressText.textContent='正在加载列表...';if(selectedIPSource==='local'){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId){if(originalIPs.length===0){showMessage('请先上传文件','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();progressText.textContent='未就绪';return}const allIPs=[...originalIPs];const shuffled=shuffleArray(allIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled}else{const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showMessage('文件失效','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();return}const parsedData=JSON.parse(fileData);const currentPort=selectedPort;const parsedIPs=parseFileContent(parsedData.content,currentPort);if(parsedIPs.length===0){showMessage('无有效IP','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();return}const shuffled=shuffleArray(parsedIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled}}else{originalIPs=await loadIPs(selectedIPSource,selectedPort,selectedCount)}if(originalIPs.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">加载失败</div>';ipCount.textContent='0';testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();progressText.textContent='失败';return}ipCount.textContent=originalIPs.length;displayLoadedIPs();testBtn.innerHTML='<i class="fas fa-circle-notch fa-spin"></i> 测速中...';progressText.textContent='测速进行中...';currentDisplayType='testing';showMoreSection.style.display='none';const results=await testIPsWithConcurrency(originalIPs,selectedPort,selectedConcurrency);testResults=results.sort((a,b)=>a.latency-b.latency);currentDisplayType='results';showingAll=false;displayResults();createRegionFilter();testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-redo"></i> 重新测速';enableButtons();progressText.textContent='测速完成';scrollToElement('result-card')}
 </script>
 </body>
 </html>`;
@@ -3087,4 +3299,4 @@ async function startTest(){const testBtn=document.getElementById('test-btn');con
     });
 
     return response;
-} 
+}
