@@ -27,6 +27,10 @@ let lastUsageTime = 0;
 const FAILED_IP_CACHE = new Map();
 const FAILED_TTL = 10 * 60 * 1000;
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+let cachedTrojanHash = null;
+let cachedTrojanPwd = null;
+
 function uniqueIPList(list) {
     const seen = new Set();
     return list.filter(item => {
@@ -46,11 +50,7 @@ const UUIDUtils = {
         return 'session_' + crypto.randomUUID() + Date.now().toString(36);
     },
     isValidUUID(uuid) {
-        const p1 = '^[0-9a-f]{8}-[0-9a-f]{4}-';
-        const p2 = '[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-';
-        const p3 = '[0-9a-f]{12}$';
-        const regex = new RegExp(p1 + p2 + p3, 'i');
-        return regex.test(uuid);
+        return UUID_REGEX.test(uuid);
     }
 };
 
@@ -174,7 +174,7 @@ const ConfigUtils = {
             et: false,
             tp: '',
             klp: 'login',
-            uuidSet: new Set(uid.split(',').map(s => s.trim())),
+            uuidSet: new Set(uid.split(',').map(s => s.trim().toLowerCase())),
             cfConfig: {},
             proxyConfig: {}
         };
@@ -198,7 +198,7 @@ const ConfigUtils = {
                     cfConfig: unifiedConfig.cfConfig || {},
                     proxyConfig: unifiedConfig.proxyConfig || {},
                     klp: unifiedConfig.klp || 'login',
-                    uuidSet: new Set(configUid.split(',').map(s => s.trim()))
+                    uuidSet: new Set(configUid.split(',').map(s => s.trim().toLowerCase()))
                 };
             }
         } catch (e) {}
@@ -396,7 +396,7 @@ async function optimizeConfigLoading(env, ctx) {
                 tp: tp,
                 parsedIPs: yx.map(ip => IPParser.parsePreferredIP(ip)),
                 validFDCs: fdc.filter(s => s && s.trim() !== ''),
-                uuidSet: new Set(uid.split(',').map(s => s.trim())),
+                uuidSet: new Set(uid.split(',').map(s => s.trim().toLowerCase())),
                 proxyConfig: {}
             };
         }
@@ -458,7 +458,7 @@ async function saveConfigToKV(env, cfipArr, fdipArr, u = null, protocolCfg = nul
 
     await Promise.all(ps);
 
-    const uuidSet = new Set((u || uid).split(',').map(s => s.trim()));
+    const uuidSet = new Set((u || uid).split(',').map(s => s.trim().toLowerCase()));
     cc = {
         ...unifiedConfig,
         timestamp: Date.now(),
@@ -478,7 +478,8 @@ async function connectWithTimeout(host, port, timeoutMs) {
         hostname: host,
         port: port,
         allowHalfOpen: true,
-        secureTransport: 'off'
+        secureTransport: 'off',
+        noDelay: true
     });
 
     let timer = null;
@@ -502,11 +503,10 @@ async function connectWithTimeout(host, port, timeoutMs) {
 
 async function universalConnectWithFailover() {
     let valid = cc?.validFDCs || fdc.filter(s => s && s.trim() !== '');
-    if (valid.length === 0) valid = ['Kr.tp50000.netlib.re'];
+    if (valid.length === 0) valid = ['www.visa.com.sg'];
 
     const PRIMARY_TIMEOUT = 3000;
-    const RACE_TIMEOUT = 2000;
-    const RACE_SIZE = 3;
+    const BACKUP_TIMEOUT = 2000;
 
     const primaryIP = valid[0];
     const backupIPs = valid.slice(1);
@@ -543,20 +543,13 @@ async function universalConnectWithFailover() {
     }
 
     let lastError = null;
-    for (let i = 0; i < candidates.length; i += RACE_SIZE) {
-        const batch = candidates.slice(i, i + RACE_SIZE);
+    for (const s of candidates) {
+        const { hostname, port } = IPParser.parseConnectionAddress(s);
         try {
-            return await Promise.any(batch.map(async (s) => {
-                const { hostname, port } = IPParser.parseConnectionAddress(s);
-                try {
-                    const socket = await connectWithTimeout(hostname, port, RACE_TIMEOUT);
-                    return { socket, server: { hostname, port, original: s } };
-                } catch (err) {
-                    FAILED_IP_CACHE.set(s, Date.now());
-                    throw err;
-                }
-            }));
+            const socket = await connectWithTimeout(hostname, port, BACKUP_TIMEOUT);
+            return { socket, server: { hostname, port, original: s } };
         } catch (err) {
+            FAILED_IP_CACHE.set(s, Date.now());
             lastError = err;
         }
     }
@@ -667,7 +660,12 @@ function rightRotate(value, amount) {
 
 async function parseTrojanHeader(buffer, ut) {
     const passwordToHash = tp || ut;
-    const sha224Password = await sha224Hash(passwordToHash);
+    if (cachedTrojanPwd !== passwordToHash || !cachedTrojanHash) {
+        cachedTrojanHash = await sha224Hash(passwordToHash);
+        cachedTrojanPwd = passwordToHash;
+    }
+    const sha224Password = cachedTrojanHash;
+
     if (buffer.byteLength < 58) {
         return {
             hasError: true,
@@ -682,7 +680,7 @@ async function parseTrojanHeader(buffer, ut) {
             message: "invalid trojan header format (missing CR LF)"
         };
     }
-    const password = new TextDecoder().decode(buffer.slice(0, crLfIndex));
+    const password = new TextDecoder().decode(buffer.subarray(0, crLfIndex));
     if (password !== sha224Password) {
         return {
             hasError: true,
@@ -690,7 +688,7 @@ async function parseTrojanHeader(buffer, ut) {
         };
     }
 
-    const socks5DataBuffer = buffer.slice(crLfIndex + 2);
+    const socks5DataBuffer = buffer.subarray(crLfIndex + 2);
     if (socks5DataBuffer.byteLength < 6) {
         return {
             hasError: true,
@@ -698,7 +696,7 @@ async function parseTrojanHeader(buffer, ut) {
         };
     }
 
-    const view = new DataView(socks5DataBuffer);
+    const view = new DataView(socks5DataBuffer.buffer, socks5DataBuffer.byteOffset, socks5DataBuffer.byteLength);
     const cmd = view.getUint8(0);
     if (cmd !== 1) {
         return {
@@ -715,21 +713,21 @@ async function parseTrojanHeader(buffer, ut) {
         case 1:
             addressLength = 4;
             address = new Uint8Array(
-                socks5DataBuffer.slice(addressIndex, addressIndex + addressLength)
+                socks5DataBuffer.subarray(addressIndex, addressIndex + addressLength)
             ).join(".");
             break;
         case 3:
             addressLength = new Uint8Array(
-                socks5DataBuffer.slice(addressIndex, addressIndex + 1)
+                socks5DataBuffer.subarray(addressIndex, addressIndex + 1)
             )[0];
             addressIndex += 1;
             address = new TextDecoder().decode(
-                socks5DataBuffer.slice(addressIndex, addressIndex + addressLength)
+                socks5DataBuffer.subarray(addressIndex, addressIndex + addressLength)
             );
             break;
         case 4:
             addressLength = 16;
-            const dataView = new DataView(socks5DataBuffer.slice(addressIndex, addressIndex + addressLength));
+            const dataView = new DataView(socks5DataBuffer.buffer, socks5DataBuffer.byteOffset + addressIndex, addressLength);
             const ipv6 = [];
             for (let i = 0; i < 8; i++) {
                 ipv6.push(dataView.getUint16(i * 2).toString(16));
@@ -751,8 +749,8 @@ async function parseTrojanHeader(buffer, ut) {
     }
 
     const portIndex = addressIndex + addressLength;
-    const portBuffer = socks5DataBuffer.slice(portIndex, portIndex + 2);
-    const portRemote = new DataView(portBuffer).getUint16(0);
+    const portBuffer = socks5DataBuffer.subarray(portIndex, portIndex + 2);
+    const portRemote = new DataView(portBuffer.buffer, portBuffer.byteOffset, 2).getUint16(0);
 
     return {
         hasError: false,
@@ -760,7 +758,7 @@ async function parseTrojanHeader(buffer, ut) {
         addressType: atype,
         port: portRemote,
         hostname: address,
-        rawClientData: socks5DataBuffer.slice(portIndex + 4)
+        rawClientData: socks5DataBuffer.subarray(portIndex + 4)
     };
 }
 
@@ -775,7 +773,6 @@ async function VLOverWSHandler(req, config, proxyCtx) {
     let protocolType = null;
     let processed = false;
     let remoteWriter = null;
-    let streamController = null;
 
     const cleanup = () => {
         if (remote.value) {
@@ -783,8 +780,12 @@ async function VLOverWSHandler(req, config, proxyCtx) {
             remote.value = null;
         }
         if (remoteWriter) {
-            try { remoteWriter.close(); } catch(e) {}
+            try { remoteWriter.releaseLock(); } catch(e) {}
             remoteWriter = null;
+        }
+        if (udpWrite && typeof udpWrite.close === 'function') {
+            try { udpWrite.close(); } catch(e) {}
+            udpWrite = null;
         }
         safeCloseWebSocket(ws);
     };
@@ -803,9 +804,13 @@ async function VLOverWSHandler(req, config, proxyCtx) {
     stream.pipeTo(new WritableStream({
         async write(chunk, ctrl) {
             try {
+                if (chunk instanceof ArrayBuffer) {
+                    chunk = new Uint8Array(chunk);
+                }
+
                 if (processed) {
                     if (isDns && udpWrite) {
-                        return udpWrite(chunk);
+                        return udpWrite.write(chunk);
                     }
                     if (remote.value) {
                         if (!remoteWriter) {
@@ -848,12 +853,12 @@ async function VLOverWSHandler(req, config, proxyCtx) {
                             }
                         }
                         const respHeader = new Uint8Array([VLVersion[0], 0]);
-                        const rawData = chunk.slice(rawDataIndex);
+                        const rawData = chunk.subarray(rawDataIndex);
                         
                         if (isDns) {
-                            const { write } = await handleUDPO(ws, respHeader);
-                            udpWrite = write;
-                            udpWrite(rawData);
+                            const writerObj = await handleUDPO(ws, respHeader);
+                            udpWrite = writerObj;
+                            udpWrite.write(rawData);
                             processed = true;
                             return;
                         }
@@ -909,8 +914,11 @@ async function handleTCP(remote, addr, pt, raw, ws, vh, proxyCtx) {
     }
 
     const writer = tcpSocket.writable.getWriter();
-    await writer.write(raw);
-    writer.releaseLock();
+    try {
+        await writer.write(raw);
+    } finally {
+        writer.releaseLock();
+    }
 
     tcpSocket.readable.pipeTo(new WritableStream({
         write(chunk) {
@@ -937,7 +945,7 @@ async function createConnection(host, port, proxyCtx, addressType = 3) {
     const { enableType, global, parsedAddress } = proxyCtx;
     const tryDirect = async () => {
         try {
-            const s = connect({ hostname: host, port: port, connectTimeout: globalTimeout, allowHalfOpen: true });
+            const s = connect({ hostname: host, port: port, connectTimeout: globalTimeout, allowHalfOpen: true, noDelay: true });
             await s.opened;
             return s;
         } catch (e) {
@@ -985,7 +993,8 @@ async function socks5Connect(addressRemote, portRemote, proxyAddress, addressTyp
         hostname,
         port,
         connectTimeout: globalTimeout,
-        allowHalfOpen: true
+        allowHalfOpen: true,
+        noDelay: true
     });
     const writer = socket.writable.getWriter();
     const reader = socket.readable.getReader();
@@ -1045,7 +1054,8 @@ async function httpConnect(addressRemote, portRemote, proxyAddress) {
         hostname,
         port,
         connectTimeout: globalTimeout,
-        allowHalfOpen: true
+        allowHalfOpen: true,
+        noDelay: true
     });
     const writer = socket.writable.getWriter();
     const reader = socket.readable.getReader();
@@ -1087,7 +1097,7 @@ async function httpConnect(addressRemote, portRemote, proxyAddress) {
                 if (!/200 Connection Established|200 OK/i.test(headers)) {
                     throw new Error(`HTTP 代理响应错误: ${headers.split('\n')[0]}`);
                 }
-                const remainingData = responseBuffer.slice(endPos + sepLen);
+                const remainingData = responseBuffer.subarray(endPos + sepLen);
                 writer.releaseLock();
                 reader.releaseLock();
                 if (remainingData.length > 0) {
@@ -1127,11 +1137,13 @@ function makeReadableWebSocketStream(ws, early) {
                 ctrl.error(e);
             });
 
-            const { earlyData, error } = base64ToArrayBuffer(early);
-            if (error) {
-                ctrl.error(error);
-            } else if (earlyData) {
-                ctrl.enqueue(earlyData);
+            if (early) {
+                const { earlyData, error } = base64ToArrayBuffer(early);
+                if (error) {
+                    ctrl.error(error);
+                } else if (earlyData) {
+                    ctrl.enqueue(earlyData);
+                }
             }
         },
 
@@ -1152,7 +1164,7 @@ async function processVHeader(VLBuffer, uuidSet) {
         };
     }
     
-    const view = new Uint8Array(VLBuffer);
+    const view = VLBuffer; 
     const version = view.subarray(0, 1);
     const slice = view.subarray(1, 17);
     const sliceStr = stringify(slice);
@@ -1160,7 +1172,7 @@ async function processVHeader(VLBuffer, uuidSet) {
     let isValid = false;
     let isUDP = false;
     
-    isValid = uuidSet ? uuidSet.has(sliceStr) : (sliceStr === uid);
+    isValid = uuidSet ? uuidSet.has(sliceStr) : (sliceStr === uid.toLowerCase());
 
     if (!isValid) {
         return {
@@ -1259,10 +1271,12 @@ async function handleUDPO(ws, vh) {
     const ts = new TransformStream({
         transform(chunk, ctrl) {
             for (let i = 0; i < chunk.byteLength;) {
-                const lenBuf = chunk.slice(i, i + 2);
-                const len = new DataView(lenBuf).getUint16(0);
-                const
-                    data = new Uint8Array(chunk.slice(i + 2, i + 2 + len));
+                let view = chunk;
+                if(chunk instanceof ArrayBuffer) view = new Uint8Array(chunk);
+                
+                const lenBuf = view.subarray(i, i + 2);
+                const len = new DataView(lenBuf.buffer, lenBuf.byteOffset, lenBuf.byteLength).getUint16(0);
+                const data = new Uint8Array(view.subarray(i + 2, i + 2 + len));
                 i = i + 2 + len;
                 ctrl.enqueue({ lenBuf, data });
             }
@@ -1296,6 +1310,9 @@ async function handleUDPO(ws, vh) {
     return {
         write(chunk) {
             w.write(chunk);
+        },
+        close() {
+            try { w.close(); } catch(e) {}
         }
     };
 }
@@ -1318,7 +1335,7 @@ function genConfig(u, url) {
             const ipData = IPParser.parsePreferredIP(item);
             if (!ipData) return null;
             const { hostname, port, displayName } = ipData;
-            return `${hd}://${u}@${hostname}:${port}?encryption=none&security=tls&sni=${url}&fp=chrome&type=ws&host=${url}&path=${ep}#${encodeURIComponent('Vless-' + displayName)}`;
+            return `${hd}://${u}@${hostname}:${port}?encryption=none&security=tls&sni=${url}&fp=chrome&type=ws&host=${url}&path=${ep}&tfo=1#${encodeURIComponent('Vless-' + displayName)}`;
         }).filter(Boolean);
         links.push(...vlessLinks);
     }
@@ -1330,7 +1347,7 @@ function genConfig(u, url) {
             if (!ipData) return null;
             const { hostname, port, displayName } = ipData;
             const hd = join('t', 'r', 'o', 'j', 'a', 'n');
-            return `${hd}://${password}@${hostname}:${port}?security=tls&sni=${url}&fp=chrome&type=ws&host=${url}&path=${ep}#${encodeURIComponent('Trojan-' + displayName)}`;
+            return `${hd}://${password}@${hostname}:${port}?security=tls&sni=${url}&fp=chrome&type=ws&host=${url}&path=${ep}&tfo=1#${encodeURIComponent('Trojan-' + displayName)}`;
         }).filter(Boolean);
         links.push(...trojanLinks);
     }
@@ -1341,7 +1358,7 @@ function genConfig(u, url) {
             const ipData = IPParser.parsePreferredIP(item);
             if (!ipData) return null;
             const { hostname, port, displayName } = ipData;
-            return `${hd}://${u}@${hostname}:${port}?encryption=none&security=tls&sni=${url}&fp=chrome&type=ws&host=${url}&path=${ep}#${encodeURIComponent(displayName)}`;
+            return `${hd}://${u}@${hostname}:${port}?encryption=none&security=tls&sni=${url}&fp=chrome&type=ws&host=${url}&path=${ep}&tfo=1#${encodeURIComponent(displayName)}`;
         }).filter(Boolean);
         links.push(...vlessLinks);
     }
@@ -1364,7 +1381,7 @@ async function genSurgeConfig(u, url) {
             const ipData = IPParser.parsePreferredIP(item);
             if (!ipData) return;
             const { hostname, port, displayName } = ipData;
-            const nodeConfig = `${displayName} = trojan, ${hostname}, ${port}, password=${password}, sni=${url}, skip-cert-verify=true, ws=true, ws-path=${wp}, ws-headers=Host:"${url}"`;
+            const nodeConfig = `${displayName} = trojan, ${hostname}, ${port}, password=${password}, sni=${url}, skip-cert-verify=true, ws=true, ws-path=${wp}, ws-headers=Host:"${url}", tfo=true`;
             nodes.push(nodeConfig);
             nodeNames.push(displayName);
         });
@@ -1415,17 +1432,15 @@ async function getCloudflareUsage(env) {
     }
     
     if (!cc?.cfConfig) return { success: false, pages: 0, workers: 0, total: 0 };
-    const { apiMode, accountId, apiToken, email, globalApiKey } = cc.cfConfig;
-    if (!apiToken && (!email || !globalApiKey)) {
+    const { accountId, apiToken } = cc.cfConfig;
+    if (!apiToken) {
         return { success: false, pages: 0, workers: 0, total: 0 };
     }
 
     const API = "https://api.cloudflare.com/client/v4";
     const sum = (a) => a?.reduce((t, i) => t + (i?.sum?.requests || 0), 0) || 0;
     
-    const headers = apiMode === 'token' ?
-        { "Authorization": `Bearer ${apiToken}`, "Content-Type": "application/json" } :
-        { "X-AUTH-EMAIL": email, "X-AUTH-KEY": globalApiKey, "Content-Type": "application/json" };
+    const headers = { "Authorization": `Bearer ${apiToken}`, "Content-Type": "application/json" };
 
     try {
         let AccountID = accountId;
@@ -1541,7 +1556,7 @@ async function getRequestProxyConfig(request, config) {
 }
 
 async function 获取SOCKS5账号(address) {
-    address = address.replace(/^(socks5?|http|g?s5|g?http):\/\//i, '');
+    address = address.replace(/^(socks5?|https?|g?s5|g?https?):\/\//i, '');
     if (address.includes('#')) {
         address = address.split('#')[0];
     }
@@ -1844,6 +1859,41 @@ function getCommonCSS() {
         margin-right: 6px;
         animation: pulse-green 2s infinite;
     }
+    .toast-container {
+        position: fixed;
+        top: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10000;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        pointer-events: none;
+    }
+    .toast {
+        background: var(--surface);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        padding: 12px 24px;
+        border-radius: 50px;
+        box-shadow: var(--shadow);
+        color: var(--text);
+        font-weight: 500;
+        font-size: 0.95rem;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        opacity: 0;
+        transform: translateY(-20px);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        pointer-events: auto;
+        border: 1px solid var(--border);
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.success { border-color: rgba(34, 197, 94, 0.5); }
+    .toast.success i { color: #22c55e; }
+    .toast.error { border-color: rgba(239, 68, 68, 0.5); }
+    .toast.error i { color: #ef4444; }
     `;
 }
 
@@ -1894,8 +1944,8 @@ async function handleUsageAPI(req, env, ctx) {
     }
     
     const config = await optimizeConfigLoading(env, ctx);
-    const hasCloudflareConfig = config?.cfConfig && 
-        (config.cfConfig.apiToken || (config.cfConfig.email && config.cfConfig.globalApiKey));
+    const hasCloudflareConfig = config?.cfConfig && config.cfConfig.apiToken;
+    
     if (!hasCloudflareConfig) {
         return ResponseBuilder.json({ 
             success: false, 
@@ -1912,6 +1962,50 @@ async function handleUsageAPI(req, env, ctx) {
             total: usage.total
         }
     });
+}
+
+async function handleProxyTest(req, env) {
+    try {
+        const { type, account } = await req.json();
+        
+        if (!account) {
+            throw new Error("节点地址为空");
+        }
+
+        const parsedAddress = await 获取SOCKS5账号(account);
+        
+        const targetHost = "www.google.com";
+        const targetPort = 80;
+        
+        const startTime = Date.now();
+        let socket;
+
+        if (type === 'socks5') {
+            socket = await socks5Connect(targetHost, targetPort, parsedAddress);
+        } else if (type === 'http') {
+            const conn = await httpConnect(targetHost, targetPort, parsedAddress);
+            socket = conn.close ? conn : { close: () => conn.cancel ? conn.cancel() : null };
+        } else {
+            throw new Error("未知的代理协议类型");
+        }
+
+        const latency = Date.now() - startTime;
+        
+        try {
+            if (socket && typeof socket.close === 'function') socket.close();
+        } catch(e) {}
+
+        return ResponseBuilder.json({
+            success: true,
+            message: `连接成功! 延迟: ${latency}ms`
+        });
+
+    } catch (e) {
+        return ResponseBuilder.json({
+            success: false,
+            message: `连接失败: ${e.message}`
+        });
+    }
 }
 
 export default {
@@ -1980,6 +2074,8 @@ export default {
                         return await requireAuth(req, env, handleConfigTest);
                     case '/test-failover':
                         return await requireAuth(req, env, handleFailoverTest);
+                    case '/test-proxy':
+                        return await requireAuth(req, env, handleProxyTest);
                     case '/admin/save':
                         return await handleAdminSave(req, env);
                     case '/admin':
@@ -2229,8 +2325,28 @@ body { justify-content: flex-start; padding: 2rem 1rem; }
     </div>
 
     <script>
+    function showToast(msg, type = 'success') {
+        let container = document.querySelector('.toast-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.className = 'toast-container';
+            document.body.appendChild(container);
+        }
+        const toast = document.createElement('div');
+        toast.className = 'toast ' + type;
+        const icon = type === 'success' ? '<i class="fas fa-check-circle"></i>' : '<i class="fas fa-exclamation-circle"></i>';
+        toast.innerHTML = icon + '<span>' + msg + '</span>';
+        container.appendChild(toast);
+        requestAnimationFrame(() => toast.classList.add('show'));
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
     function copy(text) {
-        navigator.clipboard.writeText(text).then(() => alert('已复制到剪贴板'));
+        navigator.clipboard.writeText(text).then(() => showToast('已复制到剪贴板', 'success'))
+        .catch(() => showToast('复制失败，请手动复制', 'error'));
     }
     
     function copySub(type) {
@@ -2328,7 +2444,7 @@ async function handleAdminSave(req, env) {
         
         if (newPassword) await sP(env, newPassword);
 
-        if (cfApiMode === 'token' && !cfAccountId && cfApiToken) {
+        if (!cfAccountId && cfApiToken) {
             try {
                 const resp = await fetch("https://api.cloudflare.com/client/v4/accounts", {
                     headers: {
@@ -2342,12 +2458,11 @@ async function handleAdminSave(req, env) {
                         cfAccountId = data.result[0].id;
                     }
                 }
-            } catch (e) {
-            }
+            } catch (e) {}
         }
         
         const protocolCfg = { ev: protocolEv, et: protocolEt, tp: protocolTp };
-        const cfCfg = { apiMode: cfApiMode, accountId: cfAccountId, apiToken: cfApiToken, email: cfEmail, globalApiKey: cfGlobalApiKey };
+        const cfCfg = { accountId: cfAccountId, apiToken: cfApiToken };
         const proxyCfg = { enabled: proxyEnabled, type: proxyType, account: proxyAccount, global: proxyMode === 'global', whitelist: [] };
         
         await saveConfigToKV(env, cfipArr, fdipArr, u, protocolCfg, cfCfg, proxyCfg, loginPath, formDyhd, formDypz, surgeT);
@@ -2358,6 +2473,11 @@ async function handleAdminSave(req, env) {
         protocolConfig = { ev, et, tp };
         
         const host = req.headers.get('Host');
+        
+        if (req.headers.get('Accept') === 'application/json') {
+             return ResponseBuilder.json({ success: true });
+        }
+        
         return ResponseBuilder.redirect(`https://${host}/admin?msg=saved`);
     } catch (e) {
         return ResponseBuilder.text(e.message, 500);
@@ -2370,7 +2490,6 @@ async function getAdminPage(req, env) {
     if (!sessionResult.valid) return ErrorHandler.unauthorized();
     
     const url = new URL(req.url);
-    const msg = url.searchParams.get('msg');
     if (!cc) await optimizeConfigLoading(env);
     
     const html = `<!DOCTYPE html>
@@ -2427,10 +2546,90 @@ function genUUID() {
     const u = crypto.randomUUID();
     document.getElementById('uuid').value = u;
 }
-function toggleCfMode() {
-    const mode = document.getElementById('cf_api_mode').value;
-    document.getElementById('cf_token_fields').style.display = mode === 'token' ? 'block' : 'none';
-    document.getElementById('cf_email_fields').style.display = mode === 'email' ? 'block' : 'none';
+function showToast(msg, type = 'success') {
+    let container = document.querySelector('.toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast ' + type;
+    const icon = type === 'success' ? '<i class="fas fa-check-circle"></i>' : '<i class="fas fa-exclamation-circle"></i>';
+    toast.innerHTML = icon + '<span>' + msg + '</span>';
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+function testProxy() {
+    const btn = document.getElementById('proxy-test-btn');
+    const accountInput = document.querySelector('input[name="proxy_account"]');
+    const typeSelect = document.querySelector('select[name="proxy_type"]');
+    
+    const account = accountInput.value.trim();
+    const type = typeSelect.value;
+
+    if (!account) {
+        showToast('请先输入节点地址', 'error');
+        accountInput.focus();
+        return;
+    }
+
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 测试中...';
+    
+    fetch('/test-proxy', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ account: account, type: type })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if(data.success) {
+            showToast(data.message, 'success');
+        } else {
+            showToast(data.message, 'error');
+        }
+    })
+    .catch(e => showToast('请求错误: ' + e, 'error'))
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    });
+}
+async function saveConfig(e) {
+    e.preventDefault();
+    const form = e.target;
+    const btn = form.querySelector('button[type="submit"]');
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 保存中...';
+    
+    try {
+        const response = await fetch('/admin/save', {
+            method: 'POST',
+            body: new FormData(form),
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+        if (response.ok) {
+            showToast('配置已保存并立即生效', 'success');
+        } else {
+            showToast('保存失败', 'error');
+        }
+    } catch (err) {
+        showToast('网络错误: ' + err, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    }
 }
 </script>
 </head>
@@ -2440,10 +2639,8 @@ function toggleCfMode() {
             <h1 style="margin:0"><i class="fas fa-cogs"></i> 系统配置</h1>
             <a href="/" class="btn-secondary btn" style="width:auto; padding: 0.6rem 1.2rem; gap: 0.5rem;"><i class="fas fa-arrow-left"></i> 返回主页</a>
         </div>
-        
-        ${msg === 'saved' ? '<div class="success-msg" id="success-msg"><i class="fas fa-check-circle"></i> 配置已保存并立即生效</div><script>setTimeout(()=>{const m=document.getElementById("success-msg");if(m){m.style.opacity="0";m.style.transform="translateY(-10px)";setTimeout(()=>m.remove(),500)}},3000);</script>' : ''}
 
-        <form action="/admin/save" method="post">
+        <form onsubmit="saveConfig(event)">
             <div class="card" id="ip">
                 <h3><i class="fas fa-globe" style="color:var(--primary)"></i> IP 资源管理</h3>
                 <div class="grid-2">
@@ -2489,7 +2686,13 @@ function toggleCfMode() {
             </div>
 
             <div class="card">
-                <h3><i class="fas fa-network-wired" style="color:#f59e0b"></i> 代理转发 (SOCKS5/HTTP)</h3>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem;">
+                    <h3 style="margin:0"><i class="fas fa-network-wired" style="color:#f59e0b"></i> 代理转发 (SOCKS5/HTTP)</h3>
+                    <button type="button" class="btn btn-secondary" onclick="testProxy()" id="proxy-test-btn" style="width:auto; padding:0.4rem 1rem; font-size:0.85rem;">
+                        <i class="fas fa-stethoscope"></i> 测试连通性
+                    </button>
+                </div>
+                
                 <div class="form-group">
                     <label class="toggle-switch" style="display:flex; align-items:center; margin-bottom: 1rem;">
                         <input type="checkbox" name="proxy_enabled" ${cc?.proxyConfig?.enabled ? 'checked' : ''}> 启用代理转发功能
@@ -2577,38 +2780,17 @@ function toggleCfMode() {
 
             <div class="card" style="margin-bottom: 5rem;">
                 <h3><i class="fas fa-chart-line" style="color:#10b981"></i> Cloudflare API (用量统计)</h3>
-                <div class="form-group">
-                    <label>认证模式</label>
-                    <select id="cf_api_mode" name="cf_api_mode" onchange="toggleCfMode()">
-                        <option value="token" ${cc?.cfConfig?.apiMode !== 'email' ? 'selected' : ''}>Account ID + API Token (推荐)</option>
-                        <option value="email" ${cc?.cfConfig?.apiMode === 'email' ? 'selected' : ''}>Email + Global Key</option>
-                    </select>
-                </div>
-                <div id="cf_token_fields">
-                    <div class="grid-2">
-                        <div class="form-group">
-                            <label>Account ID</label>
-                            <input type="text" name="cf_account_id" value="${cc?.cfConfig?.accountId || ''}"placeholder="支持手动输入 & 支持通过Token自动获取">
-                        </div>
-                        <div class="form-group">
-                            <label>API Token</label>
-                            <input type="password" name="cf_api_token" value="${cc?.cfConfig?.apiToken || ''}"placeholder="填入Token并保存后，系统将尝试自动获取ID">
-                        </div>
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>Account ID</label>
+                        <input type="text" name="cf_account_id" value="${cc?.cfConfig?.accountId || ''}" placeholder="支持手动输入 & 支持通过Token自动获取">
                     </div>
-                    <div class="help-text"><i class="fas fa-shield-alt"></i><span>请在 Cloudflare 用户资料页创建 Token，权限选择 "Analytics: Read" (分析:读取)。</span></div>
-                </div>
-                <div id="cf_email_fields" style="display:none;">
-                    <div class="grid-2">
-                        <div class="form-group">
-                            <label>邮箱 Email</label>
-                            <input type="email" name="cf_email" value="${cc?.cfConfig?.email || ''}">
-                        </div>
-                        <div class="form-group">
-                            <label>Global API Key</label>
-                            <input type="password" name="cf_global_api_key" value="${cc?.cfConfig?.globalApiKey || ''}">
-                        </div>
+                    <div class="form-group">
+                        <label>API Token</label>
+                        <input type="password" name="cf_api_token" value="${cc?.cfConfig?.apiToken || ''}" placeholder="填入Token并保存后，系统将尝试自动获取ID">
                     </div>
                 </div>
+                <div class="help-text"><i class="fas fa-shield-alt"></i><span>请在 Cloudflare 用户资料页创建 Token，阅读日志权限选择 "Analytics: Read" (分析:读取)。</span></div>
             </div>
 
             <div style="position: fixed; bottom: 2rem; left: 0; right: 0; display: flex; justify-content: center; pointer-events: none; z-index: 100;">
@@ -2617,7 +2799,6 @@ function toggleCfMode() {
                 </button>
             </div>
         </form>
-        <script>toggleCfMode();</script>
     </div>
 </body>
 </html>`;
@@ -2682,7 +2863,7 @@ async function handleConfigTest(req, env) {
 async function handleFailoverTest(req, env) {
     try {
         const testResults = [];
-        const servers = [...fdc, 'Kr.tp50000.netlib.re'];
+        const servers = [...fdc, 'www.visa.com.sg'];
         
         for (let i = 0; i < servers.length; i++) {
             const s = servers[i];
@@ -2691,7 +2872,8 @@ async function handleFailoverTest(req, env) {
                 const socket = await connect({
                     hostname: hostname,
                     port: port,
-                    connectTimeout: globalTimeout
+                    connectTimeout: globalTimeout,
+                    noDelay: true
                 });
                 socket.close();
                 testResults.push({
@@ -2869,7 +3051,17 @@ async function zxyx(request, env, txt = 'ADD.txt') {
     async function GetCFIPs(ipSource = 'official', targetPort = '443', maxCount = 50) {
         try {
             let response;
-            if (ipSource === 'as13335') {
+            if (ipSource.startsWith('http://') || ipSource.startsWith('https://')) {
+                try {
+                    response = await fetch(ipSource, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        }
+                    });
+                } catch (e) {
+                    throw new Error(`无法连接到自定义 API: ${e.message}`);
+                }
+            } else if (ipSource === 'as13335') {
                 response = await fetch(atob('aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2lwdmVyc2UvYXNuLWlwL21hc3Rlci9hcy8xMzMzNS9pcHY0LWFnZ3JlZ2F0ZWQudHh0'));
             } else if (ipSource === 'as209242') {
                 response = await fetch(atob('aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2lwdmVyc2UvYXNuLWlwL21hc3Rlci9hcy8yMDkyNDIvaXB2NC1hZ2dyZWdhdGVkLnR4dA=='));
@@ -2883,28 +3075,46 @@ async function zxyx(request, env, txt = 'ADD.txt') {
                 response = await fetch(atob('aHR0cHM6Ly93d3cuY2xvdWRmbGFyZS5jb20vaXBzLXY0Lw=='));
             }
 
-            const text = response.ok ? await response.text() : '';
-            const cidrs = text.split('\n').filter(line => line.trim() && !line.startsWith('#'));
+            if (!response.ok) throw new Error(`API 响应错误: ${response.status}`);
+            
+            const text = await response.text();
+            let lines = [];
+            try {
+                const json = JSON.parse(text);
+                if (Array.isArray(json)) lines = json;
+                else if (json.data && Array.isArray(json.data)) lines = json.data;
+                else lines = text.split('\n');
+            } catch {
+                lines = text.split('\n');
+            }
+
+            const cidrs = lines.map(String).filter(line => line.trim() && !line.trim().startsWith('#') && !line.trim().startsWith('//'));
 
             const allIPs = new Set();
             
             for (const cidr of cidrs) {
                 const cidrInfo = parseCIDRFormat(cidr.trim());
-                if (!cidrInfo) continue;
-                
-                const ipsFromCIDR = generateIPsFromCIDR(cidr.trim(), Math.ceil(maxCount / cidrs.length));
-                ipsFromCIDR.forEach(ip => allIPs.add(ip + ':' + targetPort));
+                if (cidrInfo) {
+                    const ipsFromCIDR = generateIPsFromCIDR(cidr.trim(), Math.ceil(maxCount / (cidrs.length || 1)));
+                    ipsFromCIDR.forEach(ip => allIPs.add(ip + ':' + targetPort));
+                } else {
+                    let cleanIP = cidr.trim();
+                    if (isValidIP(cleanIP.split(':')[0])) {
+                         if (!cleanIP.includes(':')) cleanIP += ':' + targetPort;
+                         allIPs.add(cleanIP);
+                    }
+                }
             }
 
             const ipArray = Array.from(allIPs);
-            const targetCount = Math.min(maxCount, ipArray.length);
-            
-            if (ipArray.length > targetCount) {
-                const shuffled = [...ipArray].sort(() => 0.5 - Math.random());
-                return shuffled.slice(0, targetCount);
+            if (ipArray.length > 0) {
+                 for (let i = ipArray.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [ipArray[i], ipArray[j]] = [ipArray[j], ipArray[i]];
+                }
             }
             
-            return ipArray;
+            return ipArray.slice(0, maxCount);
 
         } catch (error) {
             return [];
@@ -3083,15 +3293,31 @@ h3 { margin-top: 0; margin-bottom: 1.25rem; font-size: 1.25rem; font-weight: 700
 .progress-bar-success { background: #22c55e; height: 100%; width: 0%; transition: width 0.3s ease; }
 .progress-bar-fail { background: #ef4444; height: 100%; width: 0%; transition: width 0.3s ease; }
 .btn-group { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
-.message { padding: 1rem; border-radius: 0.5rem; margin-top: 1rem; display: none; }
-.message.success { background: rgba(34, 197, 94, 0.1); color: #15803d; border: 1px solid rgba(34, 197, 94, 0.2); }
-.message.error { background: rgba(239, 68, 68, 0.1); color: #b91c1c; border: 1px solid rgba(239, 68, 68, 0.2); }
-.message.info { background: rgba(59, 130, 246, 0.1); color: #1d4ed8; border: 1px solid rgba(59, 130, 246, 0.2); }
 label { font-size: 0.9rem; font-weight: 600; margin-bottom: 0.5rem; display: block; }
 select, input[type="number"] { width: 100%; }
 .control-section { padding-bottom: 1.5rem; border-bottom: 1px dashed var(--border); margin-bottom: 1.5rem; }
 .control-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
 </style>
+<script>
+function showToast(msg, type = 'success') {
+    let container = document.querySelector('.toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast ' + type;
+    const icon = type === 'success' ? '<i class="fas fa-check-circle"></i>' : '<i class="fas fa-exclamation-circle"></i>';
+    toast.innerHTML = icon + '<span>' + msg + '</span>';
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+</script>
 </head>
 <body>
     <div class="container">
@@ -3147,7 +3373,12 @@ select, input[type="number"] { width: 100%; }
                             <option value="as24429">AS24429 (Alibaba)</option>
                             <option value="as199524">AS199524 (G-Core)</option>
                             <option value="local">本地文件上传</option>
+                            <option value="custom">远程 API</option>
                         </select>
+                        <div id="custom-api-input-group" style="display:none; margin-top:0.75rem;">
+                            <input type="text" id="custom-api-url" placeholder="请输入 API 地址 (如: https://example.com/ips.txt)" style="font-size:16px;">
+                            <div style="font-size:0.75rem; color:var(--text-light); margin-top:0.25rem;">支持格式: 纯文本 IP/CIDR (换行分隔)</div>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>测速端口</label>
@@ -3157,13 +3388,6 @@ select, input[type="number"] { width: 100%; }
                             <option value="2083">2083 (HTTPS)</option>
                             <option value="2087">2087 (HTTPS)</option>
                             <option value="2096">2096 (HTTPS)</option>
-                            <option value="80">80 (HTTP)</option>
-                            <option value="8080">8080 (HTTP)</option>
-                            <option value="8880">8880 (HTTP)</option>
-                            <option value="2052">2052 (HTTP)</option>
-                            <option value="2082">2082 (HTTP)</option>
-                            <option value="2086">2086 (HTTP)</option>
-                            <option value="2095">2095 (HTTP)</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -3193,8 +3417,6 @@ select, input[type="number"] { width: 100%; }
                     </div>
                 </div>
             </div>
-
-            <div id="message" class="message"></div>
         </div>
 
         <div class="card" id="result-card">
@@ -3248,29 +3470,61 @@ function updateFileManagementButtons(){const savedFilesSelect=document.getElemen
 function handleSavedFileSelect(select){updateFileManagementButtons();if(select.value){document.getElementById('ip-source-select').value='local';loadSavedFile(select.value)}}
 function parseCIDRFormat(cidrString){try{const[network,prefixLength]=cidrString.split('/');const prefix=parseInt(prefixLength);if(isNaN(prefix)||prefix<8||prefix>32){return null}const ipRegex=/^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/;if(!ipRegex.test(network)){return null}const octets=network.split('.').map(Number);for(const octet of octets){if(octet<0||octet>255){return null}}return{network:network,prefixLength:prefix,type:'cidr'}}catch(error){return null}}
 function generateIPsFromCIDR(cidr,maxIPs=100){try{const[network,prefixLength]=cidr.split('/');const prefix=parseInt(prefixLength);const ipToInt=(ip)=>{return ip.split('.').reduce((acc,octet)=>(acc<<8)+parseInt(octet),0)>>>0};const intToIP=(int)=>{return[(int>>>24)&255,(int>>>16)&255,(int>>>8)&255,int&255].join('.')};const networkInt=ipToInt(network);const hostBits=32-prefix;const numHosts=Math.pow(2,hostBits);if(numHosts<=2){return[]}const maxHosts=numHosts-2;const actualCount=Math.min(maxIPs,maxHosts);const ips=new Set();if(maxHosts<=0){return[]}let attempts=0;const maxAttempts=actualCount*10;while(ips.size<actualCount&&attempts<maxAttempts){const randomOffset=Math.floor(Math.random()*maxHosts)+1;const randomIP=intToIP(networkInt+randomOffset);ips.add(randomIP);attempts++}return Array.from(ips)}catch(error){return[]}}
-function handleFileUpload(files){if(files.length===0)return;const file=files[0];const reader=new FileReader();reader.onload=function(e){const content=e.target.result;const fileName=file.name.replace(/\\.[^/.]+$/,"");const targetPort=document.getElementById('port-select').value;const parsedIPs=parseFileContent(content,targetPort);if(parsedIPs.length===0){showMessage('未能在文件中找到有效的IP地址','error');return}saveFileToLocalStorage(fileName,parsedIPs,content);document.getElementById('ip-source-select').value='local';loadIPsFromArray(parsedIPs);showMessage(\`成功加载 \${parsedIPs.length} 个IP\`,'success')};reader.onerror=function(){showMessage('文件读取失败','error')};reader.readAsText(file)}
+function handleFileUpload(files){if(files.length===0)return;const file=files[0];const reader=new FileReader();reader.onload=function(e){const content=e.target.result;const fileName=file.name.replace(/\\.[^/.]+$/,"");const targetPort=document.getElementById('port-select').value;const parsedIPs=parseFileContent(content,targetPort);if(parsedIPs.length===0){showToast('未能在文件中找到有效的IP地址','error');return}saveFileToLocalStorage(fileName,parsedIPs,content);document.getElementById('ip-source-select').value='local';loadIPsFromArray(parsedIPs);showToast(\`成功加载 \${parsedIPs.length} 个IP\`,'success')};reader.onerror=function(){showToast('文件读取失败','error')};reader.readAsText(file)}
 function parseFileContent(content,targetPort){const lines=content.split('\\n');const ips=new Set();const userCount=parseInt(document.getElementById('count-input').value)||50;lines.forEach(line=>{line=line.trim();if(!line||line.startsWith('#')||line.startsWith('//'))return;const cidrInfo=parseCIDRFormat(line);if(cidrInfo){const maxIPsPerCIDR=Math.ceil(userCount/lines.length);const ipsFromCIDR=generateIPsFromCIDR(line,maxIPsPerCIDR);ipsFromCIDR.forEach(ip=>{const formattedIP=\`\${ip}:\${targetPort}\`;ips.add(formattedIP)});return}const parsedIP=parseIPLine(line,targetPort);if(parsedIP){if(Array.isArray(parsedIP)){parsedIP.forEach(ip=>ips.add(ip))}else{ips.add(parsedIP)}}});const ipArray=Array.from(ips);return userCount<ipArray.length?ipArray.slice(0,userCount):ipArray}
 function parseIPLine(line,targetPort){try{let ip='';let port=targetPort;let comment='';let mainPart=line;if(line.includes('#')){const parts=line.split('#');mainPart=parts[0].trim();comment=parts.slice(1).join('#').trim()}if(mainPart.includes(':')){const parts=mainPart.split(':');if(parts.length===2){ip=parts[0].trim();port=parts[1].trim()}else{return null}}else{ip=mainPart.trim()}if(!isValidIP(ip)){return null}const portNum=parseInt(port);if(isNaN(portNum)||portNum<1||portNum>65535){return null}if(comment){return\`\${ip}:\${port}#\${comment}\`}else{return\`\${ip}:\${port}\`}}catch(error){return null}}
 function isValidIP(ip){const ipv4Regex=/^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/;const match=ip.match(ipv4Regex);if(match){for(let i=1;i<=4;i++){const num=parseInt(match[i]);if(num<0||num>255){return false}}return true}return false}
 function saveFileToLocalStorage(fileName,ips,originalContent){const fileId='file_'+Date.now();const fileData={id:fileId,name:fileName,ips:ips,content:originalContent,ipCount:ips.length,timestamp:Date.now()};localStorage.setItem(LocalStorageKeys.FILE_PREFIX+fileId,JSON.stringify(fileData));const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');savedFiles.push({id:fileId,name:fileName,ipCount:ips.length,timestamp:Date.now()});localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify(savedFiles));updateSavedFilesSelect();document.getElementById('saved-files-select').value=fileId;updateFileManagementButtons()}
-function loadSavedFile(fileId){if(!fileId)return;const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showMessage('文件不存在','error');return}const parsedData=JSON.parse(fileData);const currentPort=document.getElementById('port-select').value;const updatedIPs=parsedData.ips.map(ip=>updateIPPort(ip,currentPort));document.getElementById('ip-source-select').value='local';loadIPsFromArray(updatedIPs);showMessage(\`已加载 "\${parsedData.name}"\`,'success')};
+function loadSavedFile(fileId){if(!fileId)return;const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showToast('文件不存在','error');return}const parsedData=JSON.parse(fileData);const currentPort=document.getElementById('port-select').value;const updatedIPs=parsedData.ips.map(ip=>updateIPPort(ip,currentPort));document.getElementById('ip-source-select').value='local';loadIPsFromArray(updatedIPs);showToast(\`已加载 "\${parsedData.name}"\`,'success')};
 function updateIPPort(ipString,newPort){try{let ip='';let port=newPort;let comment='';if(ipString.includes('#')){const parts=ipString.split('#');const mainPart=parts[0].trim();comment=parts[1].trim();if(mainPart.includes(':')){const ipPortParts=mainPart.split(':');if(ipPortParts.length===2){ip=ipPortParts[0].trim()}else{return ipString}}else{ip=mainPart}}else{if(ipString.includes(':')){const ipPortParts=ipString.split(':');if(ipPortParts.length===2){ip=ipPortParts[0].trim()}else{return ipString}}else{ip=ipString}}if(comment){return\`\${ip}:\${port}#\${comment}\`}else{return\`\${ip}:\${port}\`}}catch(error){return ipString}}
 function loadIPsFromArray(ips){originalIPs=ips;testResults=[];displayedResults=[];showingAll=false;currentDisplayType='loading';document.getElementById('ip-count').textContent=ips.length;displayLoadedIPs();document.getElementById('test-btn').disabled=false;updateButtonStates()}
-function deleteSavedFile(){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId)return;if(!confirm('确定删除？'))return;const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');const filteredFiles=savedFiles.filter(file=>file.id!==fileId);localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify(filteredFiles));localStorage.removeItem(LocalStorageKeys.FILE_PREFIX+fileId);updateSavedFilesSelect();updateFileManagementButtons();showMessage('文件已删除','success')}
+function deleteSavedFile(){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId)return;if(!confirm('确定删除？'))return;const savedFiles=JSON.parse(localStorage.getItem(LocalStorageKeys.SAVED_FILES)||'[]');const filteredFiles=savedFiles.filter(file=>file.id!==fileId);localStorage.setItem(LocalStorageKeys.SAVED_FILES,JSON.stringify(filteredFiles));localStorage.removeItem(LocalStorageKeys.FILE_PREFIX+fileId);updateSavedFilesSelect();updateFileManagementButtons();showToast('文件已删除','success')}
 async function loadCloudflareLocations(){try{const response=await fetch(atob('aHR0cHM6Ly9zcGVlZC5jbG91ZGZsYXJlLmNvbS9sb2NhdGlvbnM='));if(response.ok){const locations=await response.json();cloudflareLocations={};locations.forEach(location=>{cloudflareLocations[location.iata]=location})}}catch(error){}}
-function initializeSettings(){const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');const savedPort=localStorage.getItem(StorageKeys.PORT);const savedIPSource=localStorage.getItem(StorageKeys.IP_SOURCE);const savedCount=localStorage.getItem(StorageKeys.COUNT);const savedConcurrency=localStorage.getItem(StorageKeys.CONCURRENCY);if(savedPort)portSelect.value=savedPort;if(savedIPSource)ipSourceSelect.value=savedIPSource;if(savedCount)countInput.value=savedCount;if(savedConcurrency)concurrencyInput.value=savedConcurrency;portSelect.addEventListener('change',function(){localStorage.setItem(StorageKeys.PORT,this.value);if(originalIPs.length>0){const newPort=this.value;const updatedIPs=originalIPs.map(ip=>updateIPPort(ip,newPort));loadIPsFromArray(updatedIPs)}});ipSourceSelect.addEventListener('change',function(){localStorage.setItem(StorageKeys.IP_SOURCE,this.value)});countInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.COUNT,this.value)});concurrencyInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.CONCURRENCY,this.value)})}
+function initializeSettings(){
+    const portSelect=document.getElementById('port-select');
+    const ipSourceSelect=document.getElementById('ip-source-select');
+    const countInput=document.getElementById('count-input');
+    const concurrencyInput=document.getElementById('concurrency-input');
+    const customApiGroup = document.getElementById('custom-api-input-group');
+    const customApiInput = document.getElementById('custom-api-url');
+    const savedPort=localStorage.getItem(StorageKeys.PORT);
+    const savedIPSource=localStorage.getItem(StorageKeys.IP_SOURCE);
+    const savedCount=localStorage.getItem(StorageKeys.COUNT);
+    const savedConcurrency=localStorage.getItem(StorageKeys.CONCURRENCY);
+    const savedCustomUrl = localStorage.getItem('cf-ip-custom-url');
+    if(savedPort)portSelect.value=savedPort;
+    if(savedIPSource) {
+        ipSourceSelect.value=savedIPSource;
+        if(savedIPSource === 'custom') customApiGroup.style.display = 'block';
+    }
+    if(savedCount)countInput.value=savedCount;
+    if(savedConcurrency)concurrencyInput.value=savedConcurrency;
+    if(savedCustomUrl) customApiInput.value = savedCustomUrl;
+    portSelect.addEventListener('change',function(){localStorage.setItem(StorageKeys.PORT,this.value);if(originalIPs.length>0){const newPort=this.value;const updatedIPs=originalIPs.map(ip=>updateIPPort(ip,newPort));loadIPsFromArray(updatedIPs)}});
+    ipSourceSelect.addEventListener('change',function(){
+        localStorage.setItem(StorageKeys.IP_SOURCE,this.value);
+        if(this.value === 'custom') {
+            customApiGroup.style.display = 'block';
+            customApiInput.focus();
+        } else {
+            customApiGroup.style.display = 'none';
+        }
+    });
+    customApiInput.addEventListener('input', function() { localStorage.setItem('cf-ip-custom-url', this.value.trim()); });
+    countInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.COUNT,this.value)});
+    concurrencyInput.addEventListener('change',function(){localStorage.setItem(StorageKeys.CONCURRENCY,this.value)})
+}
 document.addEventListener('DOMContentLoaded',async function(){await loadCloudflareLocations();initializeSettings();initializeLocalStorage()});
 function shuffleArray(array){const newArray=[...array];for(let i=newArray.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[newArray[i],newArray[j]]=[newArray[j],newArray[i]]}return newArray}
 function toggleShowMore(){if(currentDisplayType==='testing'){return}showingAll=!showingAll;if(currentDisplayType==='loading'){displayLoadedIPs()}else if(currentDisplayType==='results'){displayResults()}}
 function displayLoadedIPs(){const ipList=document.getElementById('ip-list');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(originalIPs.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">加载IP列表失败</div>';showMoreSection.style.display='none';ipDisplayInfo.textContent='';return}const displayCount=showingAll?originalIPs.length:Math.min(originalIPs.length,16);const displayIPs=originalIPs.slice(0,displayCount);if(originalIPs.length<=16){ipDisplayInfo.textContent=\`共 \${originalIPs.length} 个IP\`;showMoreSection.style.display='none'}else{ipDisplayInfo.textContent=\`显示 \${displayCount} / \${originalIPs.length} 个IP\`;if(currentDisplayType!=='testing'){showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多';showMoreBtn.disabled=false}else{showMoreSection.style.display='none'}}ipList.innerHTML=displayIPs.map(ip=>\`<div class="ip-item"><span>\${ip}</span></div>\`).join('')}
-function showMessage(text,type='success'){const messageDiv=document.getElementById('message');messageDiv.textContent=text;messageDiv.className=\`message \${type}\`;messageDiv.style.display='block';setTimeout(()=>{messageDiv.style.display='none'},5000)}
 function updateButtonStates(){const replaceCfBtn=document.getElementById('replace-cf-btn');const appendCfBtn=document.getElementById('append-cf-btn');const replaceFdBtn=document.getElementById('replace-fd-btn');const appendFdBtn=document.getElementById('append-fd-btn');const hasResults=displayedResults.length>0;replaceCfBtn.disabled=!hasResults;appendCfBtn.disabled=!hasResults;replaceFdBtn.disabled=!hasResults;appendFdBtn.disabled=!hasResults}
 function disableAllButtons(){document.querySelectorAll('button, select, input').forEach(el=>el.disabled=true)}
 function enableButtons(){document.querySelectorAll('button, select, input').forEach(el=>{if(el.id!=='delete-btn')el.disabled=false});updateButtonStates();updateFileManagementButtons()}
 function formatIPForSave(result){const port=document.getElementById('port-select').value;let ip=result.ip;let countryCode=result.locationCode||'XX';let countryName=getCountryName(countryCode);return\`\${ip}:\${port}#\${countryName}|\${countryCode}\`}
 function formatIPForFD(result){const port=document.getElementById('port-select').value;let countryCode=result.locationCode||'XX';let countryName=getCountryName(countryCode);return\`\${result.ip}:\${port}#\${countryName}\`}
 function getCountryName(countryCode){const countryMap={'US':'美国','SG':'新加坡','DE':'德国','JP':'日本','KR':'韩国','HK':'香港','TW':'台湾','GB':'英国','FR':'法国','IN':'印度','BR':'巴西','CA':'加拿大','AU':'澳大利亚','NL':'荷兰','CH':'瑞士','SE':'瑞典','IT':'意大利','ES':'西班牙','RU':'俄罗斯','ZA':'南非','MX':'墨西哥','MY':'马来西亚','TH':'泰国','ID':'印度尼西亚','VN':'越南','PH':'菲律宾','TR':'土耳其','SA':'沙特阿拉伯','AE':'阿联酋','EG':'埃及','NG':'尼日利亚','IL':'以色列','PL':'波兰','UA':'乌克兰','CZ':'捷克','RO':'罗马尼亚','GR':'希腊','PT':'葡萄牙','DK':'丹麦','FI':'芬兰','NO':'挪威','AT':'奥地利','BE':'比利时','IE':'爱尔兰','LU':'卢森堡','CY':'塞浦路斯','MT':'马耳他','IS':'冰岛','CN':'中国'};return countryMap[countryCode]||countryCode}
-async function saveIPs(action,formatFunction,buttonId,successMessage){let ipsToSave=[];if(document.getElementById('region-filter')&&document.getElementById('region-filter').style.display!=='none'&&document.querySelector('.region-btn.active').getAttribute('data-region')!=='all'){ipsToSave=displayedResults}else{ipsToSave=testResults}if(ipsToSave.length===0){showMessage('无有效IP可保存','error');return}const button=document.getElementById(buttonId);const originalText=button.innerHTML;disableAllButtons();button.textContent='保存中...';try{const saveCount=Math.min(ipsToSave.length,6);const ips=ipsToSave.slice(0,saveCount).map(result=>formatFunction(result));const response=await fetch(\`?action=\${action}\`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ips})});const data=await response.json();if(data.success){showMessage(successMessage+' (前'+saveCount+'个)','success')}else{showMessage(data.error||'保存失败','error')}}catch(error){showMessage('保存失败','error')}finally{button.innerHTML=originalText;enableButtons()}}
+async function saveIPs(action,formatFunction,buttonId,successMessage){let ipsToSave=[];if(document.getElementById('region-filter')&&document.getElementById('region-filter').style.display!=='none'&&document.querySelector('.region-btn.active').getAttribute('data-region')!=='all'){ipsToSave=displayedResults}else{ipsToSave=testResults}if(ipsToSave.length===0){showToast('无有效IP可保存','error');return}const button=document.getElementById(buttonId);const originalText=button.innerHTML;disableAllButtons();button.textContent='保存中...';try{const saveCount=Math.min(ipsToSave.length,6);const ips=ipsToSave.slice(0,saveCount).map(result=>formatFunction(result));const response=await fetch(\`?action=\${action}\`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ips})});const data=await response.json();if(data.success){showToast(successMessage+' (前'+saveCount+'个)','success')}else{showToast(data.error||'保存失败','error')}}catch(error){showToast('保存失败','error')}finally{button.innerHTML=originalText;enableButtons()}}
 async function replaceCFIPs(){await saveIPs('replace-cf',formatIPForSave,'replace-cf-btn','已替换优选 IP')}
 async function appendCFIPs(){await saveIPs('append-cf',formatIPForSave,'append-cf-btn','已追加优选 IP')}
 async function replaceFDIPs(){await saveIPs('replace-fd',formatIPForFD,'replace-fd-btn','已替换反代 IP')}
@@ -3287,7 +3541,9 @@ function createRegionFilter(){const uniqueRegions=[...new Set(testResults.map(re
 function displayFilteredResults(){const ipList=document.getElementById('ip-list');const showMoreSection=document.getElementById('show-more-section');const showMoreBtn=document.getElementById('show-more-btn');const ipDisplayInfo=document.getElementById('ip-display-info');if(displayedResults.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">无结果</div>';showMoreSection.style.display='none';updateButtonStates();return}const maxDisplayCount=showingAll?displayedResults.length:Math.min(displayedResults.length,16);const currentResults=displayedResults.slice(0,maxDisplayCount);const filteredCount=displayedResults.length;if(filteredCount<=16){ipDisplayInfo.textContent=\`筛选: \${filteredCount} 个\`;showMoreSection.style.display='none'}else{ipDisplayInfo.textContent=\`显示 \${maxDisplayCount} / \${filteredCount} 个\`;showMoreSection.style.display='block';showMoreBtn.textContent=showingAll?'显示更少':'显示更多'}const resultsHTML=currentResults.map(result=>{const calibratedLatency=result.calibratedLatency||calibrateLatency(result.latency);let latencyClass='good-latency';if(calibratedLatency>200)latencyClass='bad-latency';else if(calibratedLatency>100)latencyClass='medium-latency';return\`<div class="ip-item"><span class="\${latencyClass}">\${result.display}</span></div>\`}).join('');ipList.innerHTML=resultsHTML;updateButtonStates()}
 async function loadIPs(ipSource,port,count){try{const response=await fetch(\`?loadIPs=\${ipSource}&port=\${port}&count=\${count}\`,{method:'GET'});if(!response.ok){throw new Error('Failed to load IPs')}const data=await response.json();return data.ips||[]}catch(error){return[]}}
 function scrollToElement(id){const el=document.getElementById(id);if(el){el.scrollIntoView({behavior:'smooth',block:'start'})}}
-async function startTest(){const testBtn=document.getElementById('test-btn');const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');const progressBarSuccess=document.getElementById('progress-bar-success');const progressBarFail=document.getElementById('progress-bar-fail');const progressText=document.getElementById('progress-text');const ipList=document.getElementById('ip-list');const ipCount=document.getElementById('ip-count');const resultCountVal=document.getElementById('result-count-val');const showMoreSection=document.getElementById('show-more-section');const selectedPort=portSelect.value;const selectedIPSource=ipSourceSelect.value;const selectedCount=parseInt(countInput.value)||50;const selectedConcurrency=parseInt(concurrencyInput.value)||6;localStorage.setItem(StorageKeys.PORT,selectedPort);localStorage.setItem(StorageKeys.IP_SOURCE,selectedIPSource);localStorage.setItem(StorageKeys.COUNT,selectedCount);localStorage.setItem(StorageKeys.CONCURRENCY,selectedConcurrency);testBtn.disabled=true;testBtn.innerHTML='<i class="fas fa-spinner fa-spin"></i> 处理中...';disableAllButtons();testResults=[];displayedResults=[];showingAll=false;currentDisplayType='loading';ipList.innerHTML='<div style="text-align:center;padding:1rem;">正在加载IP列表...</div>';showMoreSection.style.display='none';progressBarSuccess.style.width='0%';progressBarFail.style.width='0%';resultCountVal.textContent='0';if(window.innerWidth<768)scrollToElement('status-card');let ipSourceName='';switch(selectedIPSource){case'official':ipSourceName='Official';break;case'as13335':ipSourceName='AS13335';break;case'as209242':ipSourceName='AS209242';break;case'as24429':ipSourceName='Alibaba';break;case'as199524':ipSourceName='G-Core';break;case'local':ipSourceName='本地';break;default:ipSourceName='未知'}progressText.textContent='正在加载列表...';if(selectedIPSource==='local'){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId){if(originalIPs.length===0){showMessage('请先上传文件','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();progressText.textContent='未就绪';return}const allIPs=[...originalIPs];const shuffled=shuffleArray(allIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled}else{const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showMessage('文件失效','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();return}const parsedData=JSON.parse(fileData);const currentPort=selectedPort;const parsedIPs=parseFileContent(parsedData.content,currentPort);if(parsedIPs.length===0){showMessage('无有效IP','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();return}const shuffled=shuffleArray(parsedIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled}}else{originalIPs=await loadIPs(selectedIPSource,selectedPort,selectedCount)}if(originalIPs.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">加载失败</div>';ipCount.textContent='0';testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();progressText.textContent='失败';return}ipCount.textContent=originalIPs.length;displayLoadedIPs();testBtn.innerHTML='<i class="fas fa-circle-notch fa-spin"></i> 测速中...';progressText.textContent='测速进行中...';currentDisplayType='testing';showMoreSection.style.display='none';const results=await testIPsWithConcurrency(originalIPs,selectedPort,selectedConcurrency);testResults=results.sort((a,b)=>a.latency-b.latency);currentDisplayType='results';showingAll=false;displayResults();createRegionFilter();testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-redo"></i> 重新测速';enableButtons();progressText.textContent='测速完成';scrollToElement('result-card')}
+async function startTest(){const testBtn=document.getElementById('test-btn');const portSelect=document.getElementById('port-select');const ipSourceSelect=document.getElementById('ip-source-select');const countInput=document.getElementById('count-input');const concurrencyInput=document.getElementById('concurrency-input');const progressBarSuccess=document.getElementById('progress-bar-success');const progressBarFail=document.getElementById('progress-bar-fail');const progressText=document.getElementById('progress-text');const ipList=document.getElementById('ip-list');const ipCount=document.getElementById('ip-count');const resultCountVal=document.getElementById('result-count-val');const showMoreSection=document.getElementById('show-more-section');const selectedPort=portSelect.value;const selectedIPSource=ipSourceSelect.value;const selectedCount=parseInt(countInput.value)||50;const selectedConcurrency=parseInt(concurrencyInput.value)||6;localStorage.setItem(StorageKeys.PORT,selectedPort);localStorage.setItem(StorageKeys.IP_SOURCE,selectedIPSource);localStorage.setItem(StorageKeys.COUNT,selectedCount);localStorage.setItem(StorageKeys.CONCURRENCY,selectedConcurrency);testBtn.disabled=true;testBtn.innerHTML='<i class="fas fa-spinner fa-spin"></i> 处理中...';disableAllButtons();testResults=[];displayedResults=[];showingAll=false;currentDisplayType='loading';ipList.innerHTML='<div style="text-align:center;padding:1rem;">正在加载IP列表...</div>';showMoreSection.style.display='none';progressBarSuccess.style.width='0%';progressBarFail.style.width='0%';resultCountVal.textContent='0';if(window.innerWidth<768)scrollToElement('status-card');let ipSourceName='';
+let finalSourceParam = selectedIPSource;
+switch(selectedIPSource){case'official':ipSourceName='Official';break;case'as13335':ipSourceName='AS13335';break;case'as209242':ipSourceName='AS209242';break;case'as24429':ipSourceName='Alibaba';break;case'as199524':ipSourceName='G-Core';break;case'local':ipSourceName='本地';break;case'custom':ipSourceName='远程API';const customUrl=document.getElementById('custom-api-url').value.trim();if(!customUrl||(!customUrl.startsWith('http://')&&!customUrl.startsWith('https://'))){showToast('请输入有效的 HTTP/HTTPS API 地址','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();return}finalSourceParam=customUrl;break;default:ipSourceName='未知'}progressText.textContent='正在加载列表...';if(selectedIPSource==='local'){const savedFilesSelect=document.getElementById('saved-files-select');const fileId=savedFilesSelect.value;if(!fileId){if(originalIPs.length===0){showToast('请先上传文件','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();progressText.textContent='未就绪';return}const allIPs=[...originalIPs];const shuffled=shuffleArray(allIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled}else{const fileData=localStorage.getItem(LocalStorageKeys.FILE_PREFIX+fileId);if(!fileData){showToast('文件失效','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();return}const parsedData=JSON.parse(fileData);const currentPort=selectedPort;const parsedIPs=parseFileContent(parsedData.content,currentPort);if(parsedIPs.length===0){showToast('无有效IP','error');testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();return}const shuffled=shuffleArray(parsedIPs);originalIPs=selectedCount<shuffled.length?shuffled.slice(0,selectedCount):shuffled}}else{originalIPs=await loadIPs(finalSourceParam,selectedPort,selectedCount)}if(originalIPs.length===0){ipList.innerHTML='<div style="text-align:center;padding:1rem;">加载失败</div>';ipCount.textContent='0';testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-play"></i> 开始测速';enableButtons();progressText.textContent='失败';return}ipCount.textContent=originalIPs.length;displayLoadedIPs();testBtn.innerHTML='<i class="fas fa-circle-notch fa-spin"></i> 测速中...';progressText.textContent='测速进行中...';currentDisplayType='testing';showMoreSection.style.display='none';const results=await testIPsWithConcurrency(originalIPs,selectedPort,selectedConcurrency);testResults=results.sort((a,b)=>a.latency-b.latency);currentDisplayType='results';showingAll=false;displayResults();createRegionFilter();testBtn.disabled=false;testBtn.innerHTML='<i class="fas fa-redo"></i> 重新测速';enableButtons();progressText.textContent='测速完成';scrollToElement('result-card')}
 </script>
 </body>
 </html>`;
