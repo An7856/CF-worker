@@ -887,7 +887,7 @@ async function VLOverWSHandler(req, config, proxyCtx) {
         abort(r) {
             cleanup();
         },
-    }))
+    }), { preventClose: true })
     .catch((e) => {
         cleanup();
     })
