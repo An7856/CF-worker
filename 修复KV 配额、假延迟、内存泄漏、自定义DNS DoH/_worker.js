@@ -1962,7 +1962,7 @@ function validateForm(e) {
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>自定义登录路径</label>
+                    <label>登录路径</label>
                     <input type="text" name="login_path" value="login" required placeholder="例如: admin">
                 </div>
                 <button type="submit" class="btn">完成设置 ➜</button>
@@ -2513,7 +2513,7 @@ async function saveConfig(e) {
                         <div class="help-text"><i class="fas fa-info-circle"></i><span>仅影响 Surge 订阅格式。留空则使用系统内置模版。</span></div>
                     </div>
                      <div class="form-group">
-                        <label>自定义后台入口路径</label>
+                        <label>后台入口路径</label>
                         <div style="position:relative;">
                             <span style="position:absolute; left:1rem; top:0.75rem; color:var(--text-light); opacity:0.5;">/</span>
                             <input type="text" name="login_path" value="${cc?.klp || 'login'}" style="padding-left: 2rem;">
@@ -2522,7 +2522,7 @@ async function saveConfig(e) {
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>自定义 DNS DoH 地址 (UDP 53 转发)</label>
+                    <label>DNS DoH 地址 (UDP 53 转发)</label>
                     <input type="text" name="custom_dns" value="${cc?.dns || dns}" placeholder="例如: https://1.1.1.1/dns-query">
                     <div class="help-text"><i class="fas fa-server"></i><span>默认内置 DNS: sky.rethinkdns... 必须是支持 application/dns-message 的 DoH 地址，主要用于支持节点内的 DNS 解析请求。</span></div>
                 </div>
